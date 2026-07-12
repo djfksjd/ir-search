@@ -80,6 +80,10 @@ With your project folder open in Claude Code:
 
 or `/ir-search`. Claude reads the project context from the folder and asks only for the missing profile fields (founding stage, region, needs) before starting.
 
+**Built for repeated use:**
+- The profile is saved to `ir-search-profile.md` in your project folder — subsequent surveys just confirm "anything changed?" instead of re-asking
+- Re-surveys are diffed against the previous run automatically, reporting only **new announcements / deadline changes / closed opportunities** instead of re-reading 250+ items every time
+
 The crawlers also work standalone:
 
 ```bash
@@ -97,7 +101,8 @@ ir-search/
 ├── SKILL.md                    # workflow (profile → collect all → review all → verify → 3-tier report)
 ├── scripts/
 │   ├── kstartup_crawl.py       # K-Startup crawler
-│   └── sources_crawl.py        # Bizinfo / NIPA / KOCCA / SMTECH crawler
+│   ├── sources_crawl.py        # Bizinfo / NIPA / KOCCA / SMTECH crawler
+│   └── diff_surveys.py         # incremental re-survey diff (new / changed / closed)
 └── references/sources.md       # source registry (verified access recipes + secondary sources)
 ```
 

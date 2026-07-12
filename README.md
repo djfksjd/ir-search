@@ -81,6 +81,10 @@ Claude Code에서 프로젝트 폴더를 연 상태로:
 
 또는 `/ir-search`. Claude가 폴더에서 프로젝트 정보를 읽고, 비는 항목(창업 단계·지역·필요한 것)만 물어본 뒤 조사를 시작합니다.
 
+**반복 사용을 전제로 설계되어 있습니다:**
+- 프로필은 프로젝트 폴더의 `ir-search-profile.md`에 저장 — 다음 조사부터는 다시 묻지 않고 "바뀐 것 있나요?" 한 번만 확인
+- 재조사 시 직전 결과와 자동 비교(diff)해서 **신규 공고 / 마감 변경 / 종료된 기회**만 증분 보고 — 250건+를 매번 다시 읽지 않습니다
+
 크롤러는 단독으로도 쓸 수 있습니다:
 
 ```bash
@@ -98,7 +102,8 @@ ir-search/
 ├── SKILL.md                    # 워크플로 (프로필 → 전수수집 → 전수검토 → 상세검증 → 3분류 보고)
 ├── scripts/
 │   ├── kstartup_crawl.py       # K-Startup 크롤러
-│   └── sources_crawl.py        # 기업마당·NIPA·KOCCA·SMTECH 크롤러
+│   ├── sources_crawl.py        # 기업마당·NIPA·KOCCA·SMTECH 크롤러
+│   └── diff_surveys.py         # 재조사 증분 비교 (신규/마감변경/종료)
 └── references/sources.md       # 소스 레지스트리 (검증된 접근법 + 보조 소스)
 ```
 
