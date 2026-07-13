@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "description": "한국 정부·공공기관 지원사업 전수조사 스킬 — K-Startup·기업마당·NIPA·KOCCA·SMTECH 크롤링 후 즉시/로드맵/변형 3분류.",
   "author": {
-    "name": "epicsagas",
-    "url": "https://github.com/epicsagas"
+    "name": "djfksjd",
+    "url": "https://github.com/djfksjd"
   },
-  "homepage": "https://github.com/epicsagas/ir-search",
-  "repository": "https://github.com/epicsagas/ir-search",
+  "homepage": "https://github.com/djfksjd/ir-search",
+  "repository": "https://github.com/djfksjd/ir-search",
   "license": "MIT",
   "keywords": [
     "korea",
@@ -20,13 +20,13 @@
     "displayName": "ir-search",
     "shortDescription": "한국 정부 지원사업 전수조사",
     "longDescription": "한국 정부·공공기관 지원사업(창업지원·사업화 자금·입주공간·R&D·경진대회)을 K-Startup·기업마당·NIPA·KOCCA·SMTECH에서 전수 크롤링해, 프로젝트 프로필에 맞는 사업을 '즉시 지원 가능 / 요건 충족 시(로드맵) / 변형하면 가능' 3단계로 분류하고 상세공고 원문으로 자격요건을 검증한 보고서를 만든다. curl_cffi로 TLS 지문 차단을 회피한다.",
-    "developerName": "epicsagas",
+    "developerName": "djfksjd",
     "category": "Research",
     "capabilities": [
       "Bash",
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/epicsagas/ir-search"
+    "websiteURL": "https://github.com/djfksjd/ir-search"
   }
 }

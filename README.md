@@ -71,8 +71,8 @@ K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크
 ### Claude Code
 
 ```bash
-claude plugin marketplace add epicsagas/ir-search
-claude plugin install ir-search@epicsagas
+claude plugin marketplace add djfksjd/ir-search
+claude plugin install ir-search@djfksjd
 ```
 
 *의존성 `curl_cffi`는 세션 시작 훅(`SessionStart`)이 자동으로 설치합니다.*
@@ -80,8 +80,8 @@ claude plugin install ir-search@epicsagas
 ### Codex
 
 ```bash
-codex plugin marketplace add epicsagas/ir-search
-codex plugin add ir-search@epicsagas
+codex plugin marketplace add djfksjd/ir-search
+codex plugin add ir-search@djfksjd
 ```
 
 *의존성 `curl_cffi`는 세션 시작 훅(`SessionStart`)이 자동으로 설치합니다.*
@@ -89,7 +89,7 @@ codex plugin add ir-search@epicsagas
 ### agy (Antigravity CLI)
 
 ```bash
-agy plugin install epicsagas/ir-search
+agy plugin install djfksjd/ir-search
 agy plugin enable ir-search
 pip3 install 'curl_cffi>=0.15'   # agy는 SessionStart 훅이 없기 때문에 별도 설치 필요
 ```

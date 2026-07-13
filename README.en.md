@@ -69,8 +69,8 @@ Install as a plugin in any of the three agents — one tree supports all three h
 ### Claude Code
 
 ```bash
-claude plugin marketplace add epicsagas/ir-search
-claude plugin install ir-search@epicsagas
+claude plugin marketplace add djfksjd/ir-search
+claude plugin install ir-search@djfksjd
 ```
 
 The `curl_cffi` dependency is auto-installed by a SessionStart hook.
@@ -78,14 +78,14 @@ The `curl_cffi` dependency is auto-installed by a SessionStart hook.
 ### Codex
 
 ```bash
-codex plugin marketplace add epicsagas/ir-search
-codex plugin add ir-search@epicsagas
+codex plugin marketplace add djfksjd/ir-search
+codex plugin add ir-search@djfksjd
 ```
 
 ### agy (Antigravity CLI)
 
 ```bash
-agy plugin install epicsagas/ir-search
+agy plugin install djfksjd/ir-search
 agy plugin enable ir-search
 pip3 install 'curl_cffi>=0.15'   # no SessionStart hook in agy — install manually
 ```
