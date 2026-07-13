@@ -1,10 +1,10 @@
-<samp>[🇰🇷 한국어](README.md) · 🇺🇸 English</samp>
+<samp> · 🇺🇸 English</samp>
 
 # ir-search
 
 > ⚠️ **This skill covers South Korean government / public-agency support programs only.** It does not cover programs from any other country, and the announcements it processes are written in Korean.
 
-A Claude Code skill for **exhaustive surveys of Korean government support programs** (startup grants, commercialization funding, incubation space, R&D calls, vouchers, competitions).
+A plugin for **exhaustive surveys of Korean government support programs** (startup grants, commercialization funding, incubation space, R&D calls, vouchers, competitions) — installable in **Claude Code, Codex, and agy (Antigravity CLI)**.
 
 It crawls every currently-open announcement from K-Startup, Bizinfo, NIPA, KOCCA, and SMTECH, matches them against the profile of the project in your working folder — founding stage, region, needs (funding / space / R&D) — verifies eligibility against the original announcement text, and produces a report with a three-tier classification:
 
@@ -52,58 +52,89 @@ Every mentioned announcement carries its original URL; anything not stated in th
 
 ## Covered sources
 
-| Source | What it is | Crawler |
-|---|---|---|
-| [K-Startup](https://www.k-startup.go.kr) | Unified startup-support portal (default) | `kstartup_crawl.py` |
-| [Bizinfo](https://www.bizinfo.go.kr) | All-ministry/region SME support (widest coverage) | `sources_crawl.py` |
-| [NIPA](https://www.nipa.kr) | AI / ICT programs | `sources_crawl.py` |
-| [KOCCA](https://www.kocca.kr) | Content-industry programs | `sources_crawl.py` |
-| [SMTECH](https://www.smtech.go.kr) | SME R&D calls | `sources_crawl.py` |
+| Source                                  | What it is                                        | Crawler               |
+| --------------------------------------- | ------------------------------------------------- | --------------------- |
+| [K-Startup](https://www.k-startup.go.kr) | Unified startup-support portal (default)          | `kstartup_crawl.py` |
+| [Bizinfo](https://www.bizinfo.go.kr)     | All-ministry/region SME support (widest coverage) | `sources_crawl.py`  |
+| [NIPA](https://www.nipa.kr)              | AI / ICT programs                                 | `sources_crawl.py`  |
+| [KOCCA](https://www.kocca.kr)            | Content-industry programs                         | `sources_crawl.py`  |
+| [SMTECH](https://www.smtech.go.kr)       | SME R&D calls                                     | `sources_crawl.py`  |
 
-More sources (NIA, IITP, IRIS, regional agencies) are catalogued in `references/sources.md`.
+More sources (NIA, IITP, IRIS, regional agencies) are catalogued in `skills/ir-search/references/sources.md`.
 
 ## Install
 
+Install as a plugin in any of the three agents — one tree supports all three hosts.
+
+### Claude Code
+
 ```bash
-git clone https://github.com/djfksjd/ir-search.git ~/.claude/skills/ir-search
-pip install 'curl_cffi>=0.15'   # recommended (avoids TLS-fingerprint blocking)
+claude plugin marketplace add epicsagas/ir-search
+claude plugin install ir-search@epicsagas
+```
+
+The `curl_cffi` dependency is auto-installed by a SessionStart hook.
+
+### Codex
+
+```bash
+codex plugin marketplace add epicsagas/ir-search
+codex plugin add ir-search@epicsagas
+```
+
+### agy (Antigravity CLI)
+
+```bash
+agy plugin install epicsagas/ir-search
+agy plugin enable ir-search
+pip3 install 'curl_cffi>=0.15'   # no SessionStart hook in agy — install manually
 ```
 
 ## Use
 
-With your project folder open in Claude Code:
+With your project folder open in any agent:
 
 ```
 우리 아이템에 맞는 지원사업 전수조사 해줘
 (Survey the support programs that fit this project)
 ```
 
-or `/ir-search`. Claude reads the project context from the folder and asks only for the missing profile fields (founding stage, region, needs) before starting.
+or `/ir-search` (Claude Code). The agent reads the project context from the folder and asks only for the missing profile fields (founding stage, region, needs) before starting.
 
 **Built for repeated use:**
+
 - The profile is saved to `ir-search-profile.md` in your project folder — subsequent surveys just confirm "anything changed?" instead of re-asking
 - Re-surveys are diffed against the previous run automatically, reporting only **new announcements / deadline changes / closed opportunities** instead of re-reading 250+ items every time
 
-The crawlers also work standalone:
+The crawlers also work standalone (paths relative to the plugin directory):
 
 ```bash
-python3 scripts/kstartup_crawl.py list -o all.jsonl            # all open K-Startup announcements
-python3 scripts/kstartup_crawl.py detail 178481 -o details/    # K-Startup detail pages
-python3 scripts/sources_crawl.py list bizinfo -o biz.jsonl     # Bizinfo
-python3 scripts/sources_crawl.py list all -o sources.jsonl     # all four extra sources
-python3 scripts/sources_crawl.py detail <URL> -o details/      # detail page from any source
+python3 skills/ir-search/scripts/kstartup_crawl.py list -o all.jsonl            # all open K-Startup announcements
+python3 skills/ir-search/scripts/kstartup_crawl.py detail 178481 -o details/    # K-Startup detail pages
+python3 skills/ir-search/scripts/sources_crawl.py list bizinfo -o biz.jsonl     # Bizinfo
+python3 skills/ir-search/scripts/sources_crawl.py list all -o sources.jsonl     # all four extra sources
+python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      # detail page from any source
 ```
 
 ## Layout
 
 ```
 ir-search/
-├── SKILL.md                    # workflow (profile → collect all → review all → verify → 3-tier report)
-├── scripts/
-│   ├── kstartup_crawl.py       # K-Startup crawler
-│   ├── sources_crawl.py        # Bizinfo / NIPA / KOCCA / SMTECH crawler
-│   └── diff_surveys.py         # incremental re-survey diff (new / changed / closed)
-└── references/sources.md       # source registry (verified access recipes + secondary sources)
+├── plugin.json                       # agy marker (name/version/description)
+├── AGENTS.md                         # shared agent guide (all 3 hosts)
+├── .claude-plugin/                   # Claude Code manifests
+│   ├── plugin.json                   # + inline SessionStart hook (curl_cffi auto-install)
+│   └── marketplace.json              # enables `claude plugin marketplace add`
+├── .codex-plugin/
+│   └── plugin.json                   # Codex manifest (+ interface)
+└── skills/
+    └── ir-search/
+        ├── SKILL.md                  # workflow (profile → collect all → review all → verify → 3-tier report)
+        ├── scripts/
+        │   ├── kstartup_crawl.py     # K-Startup crawler
+        │   ├── sources_crawl.py      # Bizinfo / NIPA / KOCCA / SMTECH crawler
+        │   └── diff_surveys.py       # incremental re-survey diff (new / changed / closed)
+        └── references/sources.md     # source registry (verified access recipes + secondary sources)
 ```
 
 Note: `SKILL.md` is written in Korean — the whole domain (announcements, eligibility criteria, report vocabulary) is Korean, and the model works with it natively.

@@ -1,10 +1,10 @@
-<samp>🇰🇷 한국어 · [🇺🇸 English](README.en.md)</samp>
+<samp>🇰🇷 한국어 · </samp>
 
 # ir-search
 
 > ⚠️ **한국(대한민국) 정부·공공기관 지원사업 전용**입니다. 다른 국가의 지원 프로그램은 다루지 않습니다.
 
-한국 정부·공공기관 **지원사업 전수조사** Claude Code 스킬.
+한국 정부·공공기관 **지원사업 전수조사** 스킬 — Claude Code·Codex·agy(Antigravity CLI) 플러그인.
 
 K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크롤링해서, 현재 작업 중인 프로젝트(아이템)의 프로필 — 창업 단계·지역·필요(자금/공간/R&D) — 에 맞는 사업을 골라내고, 상세공고 원문으로 자격요건을 검증한 뒤 3단계로 분류한 보고서를 만들어 줍니다:
 
@@ -54,57 +54,90 @@ K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크
 
 ## 커버 소스
 
-| 소스 | 내용 | 크롤러 |
-|---|---|---|
-| [K-Startup](https://www.k-startup.go.kr) | 창업지원 통합 (기본) | `kstartup_crawl.py` |
-| [기업마당](https://www.bizinfo.go.kr) | 전 부처·지자체 중소기업 지원 (최대 커버리지) | `sources_crawl.py` |
-| [NIPA](https://www.nipa.kr) | AI/ICT 사업 | `sources_crawl.py` |
-| [KOCCA](https://www.kocca.kr) | 콘텐츠 지원 | `sources_crawl.py` |
-| [SMTECH](https://www.smtech.go.kr) | 중기부 R&D | `sources_crawl.py` |
+| 소스                                    | 내용                                          | 크롤러                |
+| --------------------------------------- | --------------------------------------------- | --------------------- |
+| [K-Startup](https://www.k-startup.go.kr) | 창업지원 통합 (기본)                          | `kstartup_crawl.py` |
+| [기업마당](https://www.bizinfo.go.kr)    | 전 부처·지자체 중소기업 지원 (최대 커버리지) | `sources_crawl.py`  |
+| [NIPA](https://www.nipa.kr)              | AI/ICT 사업                                   | `sources_crawl.py`  |
+| [KOCCA](https://www.kocca.kr)            | 콘텐츠 지원                                   | `sources_crawl.py`  |
+| [SMTECH](https://www.smtech.go.kr)       | 중기부 R&D                                    | `sources_crawl.py`  |
 
-그 외 소스(NIA·IITP·IRIS·지역기관 등)는 `references/sources.md`의 레지스트리 참조.
+그 외 소스(NIA·IITP·IRIS·지역기관 등)는 `skills/ir-search/references/sources.md`의 레지스트리 참조.
 
 ## 설치
 
+세 에이전트에서 플러그인으로 설치합니다. 한 트리로 세 호스트를 모두 지원합니다.
+
+### Claude Code
+
 ```bash
-git clone https://github.com/djfksjd/ir-search.git ~/.claude/skills/ir-search
-pip install 'curl_cffi>=0.15'   # 권장 (TLS 지문 차단 회피)
+claude plugin marketplace add epicsagas/ir-search
+claude plugin install ir-search@epicsagas
+```
+
+*의존성 `curl_cffi`는 세션 시작 훅(`SessionStart`)이 자동으로 설치합니다.*
+
+### Codex
+
+```bash
+codex plugin marketplace add epicsagas/ir-search
+codex plugin add ir-search@epicsagas
+```
+
+*의존성 `curl_cffi`는 세션 시작 훅(`SessionStart`)이 자동으로 설치합니다.*
+
+### agy (Antigravity CLI)
+
+```bash
+agy plugin install epicsagas/ir-search
+agy plugin enable ir-search
+pip3 install 'curl_cffi>=0.15'   # agy는 SessionStart 훅이 없기 때문에 별도 설치 필요
 ```
 
 ## 사용
 
-Claude Code에서 프로젝트 폴더를 연 상태로:
+어느 에이전트에서든 프로젝트 폴더를 연 상태로:
 
 ```
 우리 아이템에 맞는 지원사업 전수조사 해줘
 ```
 
-또는 `/ir-search`. Claude가 폴더에서 프로젝트 정보를 읽고, 비는 항목(창업 단계·지역·필요한 것)만 물어본 뒤 조사를 시작합니다.
+또는 `/ir-search`(Claude Code). 에이전트가 폴더에서 프로젝트 정보를 읽고, 비는 항목(창업 단계·지역·필요한 것)만 물어본 뒤 조사를 시작합니다.
 
 **반복 사용을 전제로 설계되어 있습니다:**
+
 - 프로필은 프로젝트 폴더의 `ir-search-profile.md`에 저장 — 다음 조사부터는 다시 묻지 않고 "바뀐 것 있나요?" 한 번만 확인
 - 재조사 시 직전 결과와 자동 비교(diff)해서 **신규 공고 / 마감 변경 / 종료된 기회**만 증분 보고 — 250건+를 매번 다시 읽지 않습니다
 
-크롤러는 단독으로도 쓸 수 있습니다:
+크롤러는 단독으로도 쓸 수 있습니다(플러그인 디렉토리 기준 경로):
 
 ```bash
-python3 scripts/kstartup_crawl.py list -o all.jsonl            # K-Startup 모집중 전수
-python3 scripts/kstartup_crawl.py detail 178481 -o details/    # K-Startup 상세공고
-python3 scripts/sources_crawl.py list bizinfo -o biz.jsonl     # 기업마당
-python3 scripts/sources_crawl.py list all -o sources.jsonl     # 4개 소스 일괄
-python3 scripts/sources_crawl.py detail <URL> -o details/      # 소스 무관 상세공고
+python3 skills/ir-search/scripts/kstartup_crawl.py list -o all.jsonl            # K-Startup 모집중 전수
+python3 skills/ir-search/scripts/kstartup_crawl.py detail 178481 -o details/    # K-Startup 상세공고
+python3 skills/ir-search/scripts/sources_crawl.py list bizinfo -o biz.jsonl     # 기업마당
+python3 skills/ir-search/scripts/sources_crawl.py list all -o sources.jsonl     # 4개 소스 일괄
+python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      # 소스 무관 상세공고
 ```
 
 ## 구성
 
 ```
 ir-search/
-├── SKILL.md                    # 워크플로 (프로필 → 전수수집 → 전수검토 → 상세검증 → 3분류 보고)
-├── scripts/
-│   ├── kstartup_crawl.py       # K-Startup 크롤러
-│   ├── sources_crawl.py        # 기업마당·NIPA·KOCCA·SMTECH 크롤러
-│   └── diff_surveys.py         # 재조사 증분 비교 (신규/마감변경/종료)
-└── references/sources.md       # 소스 레지스트리 (검증된 접근법 + 보조 소스)
+├── plugin.json                       # agy 마커 (name/version/description)
+├── AGENTS.md                         # 3사 공유 에이전트 가이드
+├── .claude-plugin/                   # Claude Code 매니페스트
+│   ├── plugin.json                   # + SessionStart 훅(curl_cffi 자동설치) 인라인
+│   └── marketplace.json              # claude plugin marketplace add 지원
+├── .codex-plugin/
+│   └── plugin.json                   # Codex 매니페스트 (+ interface)
+└── skills/
+    └── ir-search/
+        ├── SKILL.md                  # 워크플로 (프로필 → 전수수집 → 전수검토 → 상세검증 → 3분류 보고)
+        ├── scripts/
+        │   ├── kstartup_crawl.py     # K-Startup 크롤러
+        │   ├── sources_crawl.py      # 기업마당·NIPA·KOCCA·SMTECH 크롤러
+        │   └── diff_surveys.py       # 재조사 증분 비교 (신규/마감변경/종료)
+        └── references/sources.md     # 소스 레지스트리 (검증된 접근법 + 보조 소스)
 ```
 
 ## 주의
