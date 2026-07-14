@@ -1,6 +1,6 @@
 # AGENTS.md — ir-search plugin
 
-> 공유 에이전트 가이드. Claude Code·Codex·agy 세 호스트가 모두 이 파일을 시스템 프롬프트로 로드한다.
+> 공유 에이전트 가이드. Claude Code·Codex·agy(Antigravity)·Cursor·Gemini CLI·Grok Build(x.ai)가 이 파일을 컨텍스트로 로드한다.
 
 ## 역할
 
@@ -10,15 +10,17 @@
 
 크롤러는 `curl_cffi>=0.15` (TLS 지문 차단 회피)에 의존한다.
 
-- **Claude Code**: `.claude-plugin/hooks.json` 의 SessionStart 훅이 자동 설치한다 (non-fatal).
-- **Codex / agy**: SessionStart 훅이 없으므로 첫 실행 전 `pip3 install 'curl_cffi>=0.15'` 로 수동 설치한다. 스킬 실행 중 `ImportError: No module named 'curl_cffi'` 가 뜨면 같은 명령으로 설치 후 재시도.
+- **Claude Code**: `.claude-plugin/plugin.json` 인라인 SessionStart 훅이 자동 설치를 시도한다 (non-fatal).
+- **Codex**: `.codex-plugin/hooks.json` 의 SessionStart 훅이 자동 설치를 시도한다 (non-fatal).
+- **agy / Cursor / Gemini CLI / Grok Build**: 자동 설치 훅이 없다. 첫 실행 전 `pip3 install 'curl_cffi>=0.15'` 로 수동 설치한다.
+- 어느 호스트든 스킬 실행 중 `ImportError: No module named 'curl_cffi'` 가 뜨면 같은 명령으로 설치 후 재시도.
 
 ## 스크립트 경로
 
 크롤러는 `${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/` 아래 있다.
 
 - Claude Code → `${CLAUDE_PLUGIN_ROOT}`
-- Codex / agy → 각 호스트의 플러그인 루트 환경 변수로 치환. 변수를 모르면 스킬 디렉토리를 먼저 식별한 뒤 절대경로로 실행한다.
+- 그 외 호스트(Codex·agy·Cursor·Gemini CLI·Grok Build) → 각 호스트의 플러그인/스킬 루트로 치환. 변수를 모르면 스킬 디렉토리(SKILL.md 위치)를 먼저 식별한 뒤 절대경로로 실행한다. 단독 스킬 설치(clone)면 스크립트는 clone 루트 기준 `skills/ir-search/scripts/` 에 있다.
 
 ## 윤리·안전 (요약 — 전문은 SKILL.md)
 

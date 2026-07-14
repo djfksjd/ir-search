@@ -1,10 +1,10 @@
-<samp> · 🇺🇸 English</samp>
+<samp>[🇰🇷 한국어](README.md) · 🇺🇸 English</samp>
 
 # ir-search
 
 > ⚠️ **This skill covers South Korean government / public-agency support programs only.** It does not cover programs from any other country, and the announcements it processes are written in Korean.
 
-A plugin for **exhaustive surveys of Korean government support programs** (startup grants, commercialization funding, incubation space, R&D calls, vouchers, competitions) — installable in **Claude Code, Codex, and agy (Antigravity CLI)**.
+A plugin for **exhaustive surveys of Korean government support programs** (startup grants, commercialization funding, incubation space, R&D calls, vouchers, competitions) — installable in **Claude Code, Codex, agy (Antigravity CLI), Cursor, Gemini CLI, and Grok Build (x.ai)**.
 
 It crawls every currently-open announcement from K-Startup, Bizinfo, NIPA, KOCCA, and SMTECH, matches them against the profile of the project in your working folder — founding stage, region, needs (funding / space / R&D) — verifies eligibility against the original announcement text, and produces a report with a three-tier classification:
 
@@ -64,7 +64,7 @@ More sources (NIA, IITP, IRIS, regional agencies) are catalogued in `skills/ir-s
 
 ## Install
 
-Install as a plugin in any of the three agents — one tree supports all three hosts.
+One tree supports all hosts — pick the method for the agent you use.
 
 ### Claude Code
 
@@ -88,6 +88,34 @@ codex plugin add ir-search@djfksjd
 agy plugin install djfksjd/ir-search
 agy plugin enable ir-search
 pip3 install 'curl_cffi>=0.15'   # no SessionStart hook in agy — install manually
+```
+
+### Gemini CLI
+
+```bash
+gemini extensions install https://github.com/djfksjd/ir-search
+pip3 install 'curl_cffi>=0.15'
+```
+
+The extension manifest (`gemini-extension.json`) auto-discovers the skill under `skills/` and loads `AGENTS.md` as context.
+
+### Cursor / Grok Build (x.ai)
+
+Both read the shared skills directory (`~/.agents/skills/`) as well as `~/.claude/skills/`. A single clone is enough:
+
+```bash
+mkdir -p ~/.agents/skills
+git clone https://github.com/djfksjd/ir-search.git ~/.agents/skills/ir-search
+pip3 install 'curl_cffi>=0.15'
+```
+
+(The root-level `SKILL.md` symlink makes the clone directory itself act as the skill folder. Grok Build also reads Claude Code plugins directly, so if you installed via the Claude Code method above, nothing extra is needed.)
+
+### Classic (clone directly as a Claude Code skill)
+
+```bash
+git clone https://github.com/djfksjd/ir-search.git ~/.claude/skills/ir-search
+pip3 install 'curl_cffi>=0.15'
 ```
 
 ## Use
@@ -121,12 +149,17 @@ python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      
 ```
 ir-search/
 ├── plugin.json                       # agy marker (name/version/description)
-├── AGENTS.md                         # shared agent guide (all 3 hosts)
+├── gemini-extension.json             # Gemini CLI extension manifest
+├── AGENTS.md                         # shared agent guide (all hosts)
+├── SKILL.md → skills/ir-search/SKILL.md   # symlink — lets a plain clone act as the skill folder
 ├── .claude-plugin/                   # Claude Code manifests
 │   ├── plugin.json                   # + inline SessionStart hook (curl_cffi auto-install)
 │   └── marketplace.json              # enables `claude plugin marketplace add`
 ├── .codex-plugin/
 │   └── plugin.json                   # Codex manifest (+ interface)
+├── .agents/skills → skills          # symlink — shared standard (Cursor, Grok Build, …)
+├── .cursor/skills → skills          # symlink — Cursor project skills
+├── .gemini/skills → skills          # symlink — Gemini CLI workspace skills
 └── skills/
     └── ir-search/
         ├── SKILL.md                  # workflow (profile → collect all → review all → verify → 3-tier report)

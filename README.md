@@ -1,10 +1,10 @@
-<samp>🇰🇷 한국어 · </samp>
+<samp>🇰🇷 한국어 · [🇺🇸 English](README.en.md)</samp>
 
 # ir-search
 
 > ⚠️ **한국(대한민국) 정부·공공기관 지원사업 전용**입니다. 다른 국가의 지원 프로그램은 다루지 않습니다.
 
-한국 정부·공공기관 **지원사업 전수조사** 스킬 — Claude Code·Codex·agy(Antigravity CLI) 플러그인.
+한국 정부·공공기관 **지원사업 전수조사** 스킬 — Claude Code·Codex·agy(Antigravity CLI)·Cursor·Gemini CLI·Grok Build(x.ai)에서 쓸 수 있는 플러그인/스킬.
 
 K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크롤링해서, 현재 작업 중인 프로젝트(아이템)의 프로필 — 창업 단계·지역·필요(자금/공간/R&D) — 에 맞는 사업을 골라내고, 상세공고 원문으로 자격요건을 검증한 뒤 3단계로 분류한 보고서를 만들어 줍니다:
 
@@ -66,7 +66,7 @@ K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크
 
 ## 설치
 
-세 에이전트에서 플러그인으로 설치합니다. 한 트리로 세 호스트를 모두 지원합니다.
+한 트리로 여러 호스트를 지원합니다 — 아래에서 쓰는 에이전트의 방법을 고르세요.
 
 ### Claude Code
 
@@ -92,6 +92,34 @@ codex plugin add ir-search@djfksjd
 agy plugin install djfksjd/ir-search
 agy plugin enable ir-search
 pip3 install 'curl_cffi>=0.15'   # agy는 SessionStart 훅이 없기 때문에 별도 설치 필요
+```
+
+### Gemini CLI
+
+```bash
+gemini extensions install https://github.com/djfksjd/ir-search
+pip3 install 'curl_cffi>=0.15'
+```
+
+확장(`gemini-extension.json`)이 `skills/` 아래 스킬을 자동 발견하고, `AGENTS.md`를 컨텍스트로 로드합니다.
+
+### Cursor / Grok Build (x.ai)
+
+둘 다 공용 스킬 디렉토리(`~/.agents/skills/`)와 `~/.claude/skills/`를 읽습니다. clone 한 번이면 됩니다:
+
+```bash
+mkdir -p ~/.agents/skills
+git clone https://github.com/djfksjd/ir-search.git ~/.agents/skills/ir-search
+pip3 install 'curl_cffi>=0.15'
+```
+
+(루트의 `SKILL.md` 심링크 덕분에 clone 디렉토리가 그대로 스킬 폴더로 인식됩니다. Grok Build는 Claude Code 플러그인도 그대로 읽으므로, 위 Claude Code 방식으로 설치했다면 추가 작업이 필요 없습니다.)
+
+### 클래식 (Claude Code 스킬로 직접 clone)
+
+```bash
+git clone https://github.com/djfksjd/ir-search.git ~/.claude/skills/ir-search
+pip3 install 'curl_cffi>=0.15'
 ```
 
 ## 사용
@@ -124,12 +152,17 @@ python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      
 ```
 ir-search/
 ├── plugin.json                       # agy 마커 (name/version/description)
-├── AGENTS.md                         # 3사 공유 에이전트 가이드
+├── gemini-extension.json             # Gemini CLI 확장 매니페스트
+├── AGENTS.md                         # 공유 에이전트 가이드 (전 호스트)
+├── SKILL.md → skills/ir-search/SKILL.md   # 심링크 — clone 디렉토리를 그대로 스킬 폴더로 쓰기 위한 호환 계층
 ├── .claude-plugin/                   # Claude Code 매니페스트
 │   ├── plugin.json                   # + SessionStart 훅(curl_cffi 자동설치) 인라인
 │   └── marketplace.json              # claude plugin marketplace add 지원
 ├── .codex-plugin/
 │   └── plugin.json                   # Codex 매니페스트 (+ interface)
+├── .agents/skills → skills          # 심링크 — Cursor·Grok Build 등 공용 표준
+├── .cursor/skills → skills          # 심링크 — Cursor 프로젝트 스킬
+├── .gemini/skills → skills          # 심링크 — Gemini CLI 워크스페이스 스킬
 └── skills/
     └── ir-search/
         ├── SKILL.md                  # 워크플로 (프로필 → 전수수집 → 전수검토 → 상세검증 → 3분류 보고)
