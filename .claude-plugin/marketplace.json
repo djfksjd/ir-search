@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "djfksjd",
+  "owner": {
+    "name": "djfksjd",
+    "url": "https://github.com/djfksjd"
+  },
+  "metadata": {
+    "description": "Handcrafted plugins for serious AI-assisted work."
+  },
+  "plugins": [
+    {
+      "name": "ir-search",
+      "source": "./",
+      "description": "한국 정부·공공기관 지원사업 전수조사 스킬 — K-Startup·기업마당·NIPA·KOCCA·SMTECH 크롤링 + 즉시/로드맵/변형 3분류."
+    }
+  ]
+}

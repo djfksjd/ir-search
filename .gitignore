@@ -6,3 +6,7 @@ details/
 output/
 evals/
 *-workspace/
+
+.playwright-mcp/
+ir-search-profile.md
+scratch/
