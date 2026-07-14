@@ -64,7 +64,13 @@ More sources (NIA, IITP, IRIS, regional agencies) are catalogued in `skills/ir-s
 
 ## Install
 
-One tree supports all hosts — pick the method for the agent you use.
+**One-command install** — detects installed host CLIs (claude/codex/agy/gemini) and installs for each; falls back to cloning into `~/.agents/skills/` (for Cursor / Grok Build) when no CLI is found. Also handles the `curl_cffi` dependency:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/djfksjd/ir-search/main/install.sh | bash
+```
+
+To install manually instead, pick the method for the agent you use — one tree supports all hosts.
 
 ### Claude Code
 
@@ -148,6 +154,7 @@ python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      
 
 ```
 ir-search/
+├── install.sh                        # one-command installer (auto-detects hosts)
 ├── plugin.json                       # agy marker (name/version/description)
 ├── gemini-extension.json             # Gemini CLI extension manifest
 ├── AGENTS.md                         # shared agent guide (all hosts)

@@ -66,7 +66,13 @@ K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크
 
 ## 설치
 
-한 트리로 여러 호스트를 지원합니다 — 아래에서 쓰는 에이전트의 방법을 고르세요.
+**한 줄 설치** — 설치된 호스트(claude/codex/agy/gemini)를 자동 감지해 전부 설치하고, CLI가 없으면 `~/.agents/skills/`에 clone(Cursor·Grok Build용)합니다. 의존성(`curl_cffi`)까지 처리:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/djfksjd/ir-search/main/install.sh | bash
+```
+
+수동으로 하려면 아래에서 쓰는 에이전트의 방법을 고르세요 — 한 트리로 모든 호스트를 지원합니다.
 
 ### Claude Code
 
@@ -151,6 +157,7 @@ python3 skills/ir-search/scripts/sources_crawl.py detail <URL> -o details/      
 
 ```
 ir-search/
+├── install.sh                        # 한 줄 설치 스크립트 (호스트 자동 감지)
 ├── plugin.json                       # agy 마커 (name/version/description)
 ├── gemini-extension.json             # Gemini CLI 확장 매니페스트
 ├── AGENTS.md                         # 공유 에이전트 가이드 (전 호스트)
