@@ -48,9 +48,12 @@ fi
 # Also serves as the fallback when no host CLI was detected.
 SKILL_DIR="${HOME}/.agents/skills/ir-search"
 if [ -d "${SKILL_DIR}/.git" ]; then
-  git -C "${SKILL_DIR}" pull --ff-only >/dev/null 2>&1 \
-    && log "✓ ~/.agents/skills/ir-search 갱신 (Cursor·Grok Build 등)" \
-    || warn "✗ ~/.agents/skills/ir-search 갱신 실패 — 수동으로 git pull 하세요"
+  if git -C "${SKILL_DIR}" pull --ff-only >/dev/null 2>&1; then
+    log "✓ ~/.agents/skills/ir-search 갱신 (Cursor·Grok Build 등)"
+    INSTALLED=$((INSTALLED + 1))  # an update is a successful install too
+  else
+    warn "✗ ~/.agents/skills/ir-search 갱신 실패 — 수동으로 git pull 하세요"
+  fi
 elif [ ! -e "${SKILL_DIR}" ]; then
   mkdir -p "${HOME}/.agents/skills"
   if git clone --quiet "${REPO_URL}" "${SKILL_DIR}"; then
@@ -69,6 +72,7 @@ elif pip3 install 'curl_cffi>=0.15' >/dev/null 2>&1 \
   log "✓ curl_cffi 설치 완료"
 else
   warn "✗ curl_cffi 설치 실패 — 크롤러 첫 실행 전 수동 설치: pip3 install 'curl_cffi>=0.15'"
+  warn "  (PEP 668 'externally-managed-environment' 오류라면: pip3 install --break-system-packages 'curl_cffi>=0.15' 또는 pipx/venv 사용)"
 fi
 
 if [ "${INSTALLED}" -eq 0 ]; then

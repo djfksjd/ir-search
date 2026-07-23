@@ -13,6 +13,15 @@ Usage:
 
 Dependency: curl_cffi>=0.15 recommended (passes TLS-fingerprint checks).
 Falls back to the standard urllib; if blocked, an install hint is printed.
+
+Exit codes (fail-closed contract):
+  0  full success — collection complete
+  2  partial / suspicious — network error mid-crawl (partial jsonl saved),
+     page 1 parsed 0 items (site structure change), total below the minimum
+     expectation (~250 open announcements is normal, <50 is suspicious),
+     page cap reached while new items were still appearing, or (detail mode)
+     one or more detail fetches failed.
+Callers MUST treat exit 2 as incomplete coverage, never as a clean success.
 """
 import argparse
 import html as htmllib
@@ -25,6 +34,19 @@ import time
 BASE = "https://www.k-startup.go.kr/web/contents/bizpbanc-ongoing.do"
 DETAIL_URL = BASE + "?schM=view&pbancSn={sn}"
 DELAY = 0.3  # seconds between requests (politeness)
+MIN_EXPECTED = 50  # K-Startup normally lists 250+ open announcements
+
+
+def norm_date(s):
+    """Normalize date-ish strings to YYYY-MM-DD; return input if not parseable."""
+    s = re.sub(r"\s+", " ", htmllib.unescape(s or "")).strip()
+    m = re.search(r"(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})", s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", s)  # 26.07.10
+    if m:
+        return f"20{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return s
 
 
 def make_fetcher():
@@ -100,8 +122,8 @@ def parse_list(html):
                 "title": htmllib.unescape(g(r'<p class="tit">\s*([^<]+)')),
                 "program": htmllib.unescape(lists[0]) if lists else "",
                 "org": htmllib.unescape(lists[1]) if len(lists) > 1 else "",
-                "start": pick("시작일자"),
-                "deadline": pick("마감일자"),
+                "start": norm_date(pick("시작일자")),
+                "deadline": norm_date(pick("마감일자")),
                 "agency_type": g(r'<span class="flag_agency">\s*([^<]+)</span>'),
                 "url": DETAIL_URL.format(sn=m.group(1)),
             }
@@ -119,32 +141,97 @@ def cmd_list(args):
         )
     seen = {}
     page = 1
+    pages_done = 0
+    partial = False  # network/HTTP failure mid-crawl
+    no_new_streak = 0
+    last_page_had_new = False
+    stop_reason = None
     while page <= args.max_pages:
-        status, html = fetch(f"{BASE}?page={page}&schStr=&pbancEndYn=N")
+        try:
+            status, html = fetch(f"{BASE}?page={page}&schStr=&pbancEndYn=N")
+        except Exception as e:  # noqa: BLE001 — fail closed, keep partial data
+            code = getattr(e, "code", None)  # urllib raises HTTPError (has .code)
+            if code is not None:
+                status, html = code, ""
+            else:
+                print(f"[ir-search] page {page}: network error: {e}", file=sys.stderr)
+                partial = True
+                stop_reason = "network-error"
+                break
         if status != 200:
             print(f"[ir-search] page {page}: HTTP {status} — stopping", file=sys.stderr)
-            if backend == "urllib" and status in (403, 412):
+            if status in (403, 412):
                 print(
                     "[ir-search] looks blocked; pip install 'curl_cffi>=0.15' and retry.",
                     file=sys.stderr,
                 )
+            partial = True
+            stop_reason = f"http-{status}"
             break
         items = parse_list(html)
+        if page == 1 and not items:
+            print(
+                "ERROR: page 1 parsed 0 items — site structure may have changed",
+                file=sys.stderr,
+            )
+            print(f"[ir-search] {args.output} NOT written (no data)", file=sys.stderr)
+            sys.exit(2)
         new = [i for i in items if i["pbancSn"] not in seen]
         for i in items:
             seen[i["pbancSn"]] = i
+        pages_done = page
+        last_page_had_new = bool(new)
         print(
             f"[ir-search] page {page}: {len(items)} parsed, {len(new)} new, total {len(seen)}",
             file=sys.stderr,
         )
-        if not items or not new:
-            break  # past the last page only carousel items remain → 0 new
+        if not items:
+            stop_reason = "reached-total"  # past the last page: empty list
+            break
+        if not new:
+            # past the last page usually only carousel items remain → 0 new,
+            # but a single no-new page can also be a transient duplicate page.
+            no_new_streak += 1
+            if no_new_streak >= 2:
+                stop_reason = "no-new-2pages"
+                break
+        else:
+            no_new_streak = 0
         page += 1
         time.sleep(DELAY)
+    if stop_reason is None:
+        stop_reason = "page-cap"
+    print(f"[ir-search] stop reason: {stop_reason} (pages: {pages_done})", file=sys.stderr)
+
     with open(args.output, "w", encoding="utf-8") as f:
         for i in seen.values():
             f.write(json.dumps(i, ensure_ascii=False) + "\n")
     print(f"[ir-search] saved: {args.output} ({len(seen)} items)", file=sys.stderr)
+
+    fail = False
+    if partial:
+        print(
+            f"WARNING: partial — {pages_done} pages collected "
+            f"({len(seen)} items saved, coverage INCOMPLETE)",
+            file=sys.stderr,
+        )
+        fail = True
+    if stop_reason == "page-cap" and last_page_had_new:
+        print(
+            "WARNING: page cap reached — collection may be INCOMPLETE "
+            f"(--max-pages {args.max_pages}, last page still had new items)",
+            file=sys.stderr,
+        )
+        fail = True
+    if len(seen) < MIN_EXPECTED:
+        print(
+            f"WARNING: only {len(seen)} items collected (< {MIN_EXPECTED} minimum "
+            "expected — K-Startup normally lists 250+ open announcements)",
+            file=sys.stderr,
+        )
+        fail = True
+    if fail:
+        sys.exit(2)
 
 
 def strip_html(text):
@@ -157,22 +244,37 @@ def strip_html(text):
 def cmd_detail(args):
     fetch, backend = make_fetcher()
     os.makedirs(args.output, exist_ok=True)
+    results = []  # (sn, "OK path" | "FAIL reason")
     for sn in args.pbancSn:
         if not sn.isdigit():
-            print(f"[ir-search] ignoring invalid announcement id: {sn}", file=sys.stderr)
+            results.append((sn, "FAIL invalid announcement id"))
+            print(f"[ir-search] invalid announcement id: {sn}", file=sys.stderr)
             continue
         try:
             status, html = fetch(DETAIL_URL.format(sn=sn))
             if status != 200:
+                results.append((sn, f"FAIL HTTP {status}"))
                 print(f"[ir-search] {sn}: HTTP {status}", file=sys.stderr)
                 continue
             path = os.path.join(args.output, f"{sn}.txt")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(strip_html(html))
+            results.append((sn, f"OK {path}"))
             print(f"[ir-search] {sn}: saved → {path}", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001 — skip failures, keep going
+        except Exception as e:  # noqa: BLE001 — record failure, keep going
+            results.append((sn, f"FAIL {e}"))
             print(f"[ir-search] {sn}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
+    failures = [r for r in results if r[1].startswith("FAIL")]
+    print(
+        f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
+        f"{len(failures)} failed",
+        file=sys.stderr,
+    )
+    for sn, res in results:
+        print(f"[ir-search]   {sn}: {res}", file=sys.stderr)
+    if failures:
+        sys.exit(2)
 
 
 def main():
