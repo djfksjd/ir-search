@@ -40,8 +40,19 @@ def test_new_changed_closed_classification(diff_surveys, monkeypatch, tmp_path, 
     assert "## CHANGED (1)" in text and "title" in text and "apply_end" in text
     assert "## CLOSED (1)" in text and "닫힌 공고" in text
     assert "## UNCHANGED: 1 items" in text
+    # --out은 공통 diff 레코드 wrapper(kind/diff_status/changed_fields/record)
     out_recs = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()]
-    assert {r["pbancSn"] for r in out_recs} == {"3", "4"}  # new + changed only
+    assert {r["record"]["pbancSn"] for r in out_recs} == {"3", "4"}  # new + changed
+    assert {r["kind"] for r in out_recs} == {"NEW", "CHANGED"}
+    for r in out_recs:
+        assert r["diff_status"] == r["kind"]
+        assert r["record"]["source"] == "kstartup"
+        assert r["record"]["source_id"] == r["record"]["pbancSn"]
+    # GONE(닫힌 공고)은 별도 gone_ 파일로
+    gone = [json.loads(x) for x in
+            (out.parent / f"gone_{out.name}").read_text(encoding="utf-8").splitlines()]
+    assert [g["kind"] for g in gone] == ["GONE"]
+    assert gone[0]["record"]["title"] == "닫힌 공고"
 
 
 def test_empty_current_dir_exit1(diff_surveys, monkeypatch, tmp_path):
@@ -126,3 +137,81 @@ def test_profile_identical_keeps_carryover(diff_surveys, monkeypatch, tmp_path, 
     text = capsys.readouterr().out
     assert "CARRY-OVER INVALIDATED" not in text
     assert "carry over previous verdicts" in text
+
+
+# ---- content_hash / hash_version 계약 (Codex 게이트 #2 회귀) ----------------
+
+def h(rec, content_hash, version=2):
+    rec = dict(rec)
+    rec["content_hash"] = content_hash
+    rec["hash_version"] = version
+    return rec
+
+
+def test_classify_body_change_detected_via_content_hash(diff_surveys):
+    old = h(ks(1, "같은 제목"), "aaa", 2)
+    new = h(ks(1, "같은 제목"), "bbb", 2)
+    r = diff_surveys.classify(old, new)
+    assert r["kind"] == "CHANGED"
+    assert r["changed_fields"] == ["content_hash"]
+
+
+def test_classify_hash_version_switch_is_one_time_changed(diff_surveys):
+    """v2↔v3 산식 전환은 값 비교 불가 — NEEDS_REHASH 영구 루프 대신 1회 CHANGED."""
+    old = h(ks(1, "같은 제목"), "aaa", 2)
+    new = h(ks(1, "같은 제목"), "bbb", 3)
+    r = diff_surveys.classify(old, new)
+    assert r["kind"] == "CHANGED"
+    assert r["changed_fields"] == ["hash_version(산식 전환 — 1회 상세 재검증)"]
+
+
+def test_classify_vanished_hash_needs_rehash(diff_surveys):
+    old = h(ks(1, "같은 제목"), "aaa", 2)
+    new = ks(1, "같은 제목")  # 새 조사에 해시 없음
+    assert diff_surveys.classify(old, new)["kind"] == "NEEDS_REHASH"
+
+
+def test_classify_same_hash_unchanged(diff_surveys):
+    old = h(ks(1, "같은 제목"), "aaa", 2)
+    assert diff_surveys.classify(old, dict(old))["kind"] == "UNCHANGED"
+
+
+def test_diff_end_to_end_hash_change_not_carried_over(
+        diff_surveys, monkeypatch, tmp_path, capsys):
+    """본문(해시)만 바뀐 공고가 UNCHANGED로 승계되지 않는다 (SKILL 계약)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [h(ks(1, "동일 목록 필드"), "aaa", 2)])
+    write_jsonl(curr / "kstartup.jsonl", [h(ks(1, "동일 목록 필드"), "bbb", 2)])
+    out = tmp_path / "new_items.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    text = capsys.readouterr().out
+    assert "## CHANGED (1)" in text and "## UNCHANGED: 0 items" in text
+    (rec,) = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()]
+    assert rec["kind"] == "CHANGED"
+    assert rec["changed_fields"] == ["content_hash"]
+
+
+def test_diff_end_to_end_needs_rehash_emitted_to_out(
+        diff_surveys, monkeypatch, tmp_path, capsys):
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [h(ks(1, "동일"), "aaa", 2)])
+    write_jsonl(curr / "kstartup.jsonl", [ks(1, "동일")])
+    out = tmp_path / "new_items.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    assert "## NEEDS_REHASH (1)" in capsys.readouterr().out
+    (rec,) = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()]
+    assert rec["kind"] == "NEEDS_REHASH"
+
+
+def test_gone_file_not_loaded_as_raw_crawl(diff_surveys, monkeypatch, tmp_path):
+    """이전 diff가 남긴 gone_*.jsonl이 다음 diff에서 원시 수집으로 오인되지 않는다."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(1, "a")])
+    write_jsonl(curr / "kstartup.jsonl", [ks(1, "a")])
+    (curr / "gone_new_items.jsonl").write_text(
+        json.dumps({"kind": "GONE", "diff_status": "GONE", "changed_fields": [],
+                    "record": ks(99, "지난 소멸")}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    assert out.read_text(encoding="utf-8") == ""  # 소멸 잔재가 NEW로 안 뜬다
