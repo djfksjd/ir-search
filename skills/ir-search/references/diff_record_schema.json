@@ -43,7 +43,7 @@
               "url": { "type": "string", "minLength": 1 },
               "filename": { "type": ["string", "null"] },
               "download_status": {
-                "enum": ["ok", "failed", "blocked_redirect", "skipped_robots", null]
+                "enum": ["ok", "failed", "blocked_redirect", "skipped_robots", "skipped_unverified", null]
               },
               "download_reason": { "type": ["string", "null"] },
               "sha256": { "type": ["string", "null"] },

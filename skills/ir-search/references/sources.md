@@ -85,3 +85,19 @@
 2. 네트워크 요청 목록에서 `/json/`·`/api/`·`.json` XHR 엔드포인트를 찾는다 (내부 API는 대개 HTML보다 방어가 얕다)
 3. 찾은 API URL을 curl_cffi로 직접 호출해 JSON을 수집한다 — 파라미터로 페이지네이션
 4. 브라우저 도구가 없으면 해당 소스는 제외하고 보고서에 수동 확인 경로를 명시한다
+
+## 첨부 다운로드 계약 (소스별 — 실호출 확인 기록)
+
+`sources_crawl.py detail --download-dir`가 사용하는 계약. robots.txt와 첨부 URL 구조를
+실호출로 확인한 날짜를 병기한다. 사이트 개편 시 이 표부터 재검증할 것.
+
+| 소스 | robots 판정 | 첨부 URL 계약 | 지원 |
+|---|---|---|---|
+| bizinfo (2026-07-23) | `/upload`·`/download` 등 접두 불허 | `/cmm/fms/…` 다운로드 가능, `/uploads/…`는 링크만(skipped_robots) | 다운로드 |
+| K-Startup (2026-07-23) | **`Disallow: /afile*/`** — 첨부 경로 전체 불허 | `<li class="clear">` 안 `file_bg`(파일명) + `/afile/fileDownload/<KEY>` 쌍 | **링크만** (kstartup_crawl.py) |
+| NIPA (2026-07-24) | `User-agent: *` 블록 없음(Googlebot 전용 `/sea`·`/tota`뿐) — 제한 없음 | `<a href="/comm/getFile?srvcId=…&fileNo=…">파일명 (파일크기: …)</a>` | 다운로드 |
+| KOCCA (2026-07-24) | `Disallow:/*/FileDown.do` 등 — `noticeFileDown.do`는 리터럴 불일치로 허용 | 상세에 직접 첨부 없음. 팝업1 `openNoticeFileList1('intcNo')` → `/kocca/noticeFilePop.do` 추가 fetch → `fn_fileDownload('intc','seq')` 행 → `/kocca/noticeFileDown.do?intcNo=…&seqNo=…`. 팝업2 `openNoticeFileList2('pblancId')` → `pms.kocca.kr/pblanc/pblancPopupViewPage.do` (별도 PMS, JS 팝업) | 팝업1 다운로드 / 팝업2 **링크만**(skipped_unverified — 계약 미확정) |
+| SMTECH (2026-07-24) | 신청·평가 등 내부 `.do` 다수 불허, 첨부 경로는 불허 아님 | `cfn_AtchFileDownload('<ID>','/front',…)` (common.js 확인) → `GET /front/comn/AtchFileDownload.do?atchFileId=<ID>`. 상세 페이지 자체는 목록의 전체 쿼리(buclCd·dtlAncmSn·schdSe·aplySn 포함)가 없으면 intro로 302된다 — jsonl의 url을 그대로 쓸 것 | 다운로드 |
+
+공통: 전부 성공 시에만 hash v3, 불완전이면 본문 v2 + `attachments_complete:false` + exit 2.
+robots 불허·계약 미확정 첨부는 다운로드하지 않고 링크만 기록한다(우회 금지).

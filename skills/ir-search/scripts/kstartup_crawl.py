@@ -366,6 +366,10 @@ def strip_html(text):
 KSTARTUP_ROBOTS_DISALLOWED = ("/afile", "/cubersc", "/cubedata", "/html", "/jsp",
                               "/testjsp", "/eng", "/oidc")
 
+# 첨부 다운로드 허용 호스트 — 정확한 호스트만('=' 접두). 페이지 크롤링의
+# 서브도메인 와일드카드(ALLOWED_DOMAINS)와 달리 미확정 서브도메인을 배제한다.
+KSTARTUP_ATTACH_HOSTS = ("=www.k-startup.go.kr", "=k-startup.go.kr")
+
 # 본문 시작/끝 마커 — content_wrap ~ footer (실측 2026-07-23)
 KSTARTUP_START_MARKERS = (r'<div[^>]+class="[^"]*content_wrap[^"]*"',)
 KSTARTUP_END_MARKERS = (r'<div[^>]+class="[^"]*footer_area', r'<footer\b',
@@ -468,7 +472,8 @@ def cmd_detail(args):
                 if download_dir and attachments:
                     try:
                         attach_hashes = attach_download.process_attachments(
-                            attachments, download_dir, DELAY, ALLOWED_DOMAINS,
+                            attachments, download_dir, DELAY,
+                            KSTARTUP_ATTACH_HOSTS,
                             KSTARTUP_ROBOTS_DISALLOWED,
                             subdir=sn)  # 공고별 폴더 — 동명 첨부 충돌 방지
                     except attach_download.ManualEscalation as e:
@@ -534,6 +539,7 @@ def cmd_detail(args):
             print(f"[ir-search] {sn}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
     failures = [r for r in results if r[1].startswith(("FAIL", "PARTIAL"))]
+    manuals = [r for r in results if r[1].startswith("FAIL MANUAL")]
     print(
         f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
         f"{len(failures)} failed/partial",
@@ -541,6 +547,8 @@ def cmd_detail(args):
     )
     for sn, res in results:
         print(f"[ir-search]   {sn}: {res}", file=sys.stderr)
+    if manuals:
+        sys.exit(3)  # 차단 신호(401/403) — 우회하지 않고 수동 확인으로 전환
     if failures:
         sys.exit(2)
 

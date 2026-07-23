@@ -70,7 +70,11 @@ def _urlopen(req, timeout):
 
 def host_allowed(url, allowed_hosts):
     """https + 정확한 호스트/서브도메인 경계 검사 — endswith/부분 문자열 매칭은
-    evilbizinfo.go.kr, userinfo(@)·쿼리스트링 위장에 뚫린다."""
+    evilbizinfo.go.kr, userinfo(@)·쿼리스트링 위장에 뚫린다.
+
+    허용 항목이 '='로 시작하면 **정확한 호스트 일치만** 허용한다(서브도메인
+    매칭 배제). 예: '=www.kocca.kr'은 www.kocca.kr만 통과 — pms.kocca.kr 등
+    계약 미확정 서브도메인으로의 리다이렉트가 요청되지 않는다."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
@@ -78,7 +82,13 @@ def host_allowed(url, allowed_hosts):
     if parts.scheme != "https":
         return False
     host = (parts.hostname or "").lower().rstrip(".")
-    return any(host == a or host.endswith("." + a) for a in allowed_hosts)
+    for a in allowed_hosts:
+        if a.startswith("="):
+            if host == a[1:]:
+                return True
+        elif host == a or host.endswith("." + a):
+            return True
+    return False
 
 
 def open_validated(url, allowed_hosts, timeout, robots_disallowed=()):
@@ -128,19 +138,36 @@ def safe_filename(name, idx):
 _MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
 
 
+def _robots_path_match(path, pattern):
+    """robots 패턴 1건 매칭 — 접두 매칭 + 구글 확장 문법('*' 와일드카드,
+    '$' 끝 앵커) 지원. KOCCA의 'Disallow:/*/FileDown.do' 같은 패턴용."""
+    if "*" not in pattern and not pattern.endswith("$"):
+        return path.startswith(pattern)
+    anchored = pattern.endswith("$")
+    if anchored:
+        pattern = pattern[:-1]
+    regex = "".join(".*" if ch == "*" else re.escape(ch) for ch in pattern)
+    return re.match(regex + ("$" if anchored else ""), path) is not None
+
+
 def robots_allowed(url, disallowed_prefixes):
     """robots.txt 불허 접두 경로 검사 — 매칭되면 다운로드 금지(링크만 수집).
 
     fail-closed: percent-인코딩 위장(/%75ploads/, 이중 인코딩 /%2575ploads/)을
     반복 unquote(최대 5회, 고정점 도달 시 중단)로 정규화하고, **원본과 모든
     디코딩 단계 + normpath 정규화 형태 중 하나라도** 불허 접두에 걸리면
-    거부한다. 디코딩 불가/파싱 불가도 거부."""
+    거부한다. 디코딩 불가/파싱 불가도 거부.
+
+    매칭 대상은 path에 쿼리를 결합한 문자열(path?query)이다 — SMTECH의
+    'Disallow: /...List.do?RECH_ANCM_ID=S20131' 같은 쿼리 포함 규칙도
+    매칭된다. 인코딩 위장 후보 생성도 동일 결합 문자열 기준."""
     try:
-        path = urllib.parse.urlsplit(url).path
+        parts = urllib.parse.urlsplit(url)
     except ValueError:
         return False
+    target = parts.path + (("?" + parts.query) if parts.query else "")
     candidates = []
-    cur = path
+    cur = target
     for _ in range(_MAX_UNQUOTE + 1):
         candidates.append(cur)
         try:
@@ -153,13 +180,16 @@ def robots_allowed(url, disallowed_prefixes):
     else:
         return False  # 상한 내 고정점 미도달(과도한 다중 인코딩) — fail-closed
     for c in list(candidates):
-        # /a/../uploads 류 경로 정규화 형태도 함께 검사.
+        # /a/../uploads 류 경로 정규화 형태도 함께 검사 (normpath는 path
+        # 부분에만 적용 — 쿼리는 그대로 재결합).
         # POSIX normpath는 선행 '//'를 보존한다 — /%2Fuploads가 디코딩 후
         # //uploads로 남아 startswith(/uploads)를 피하므로, 선행 슬래시를
         # 단일화한 후보도 추가한다
-        n = os.path.normpath(c)
+        p_, sep, q_ = c.partition("?")
+        n = os.path.normpath(p_) + sep + q_
         candidates.extend([n, re.sub(r"^/+", "/", c), re.sub(r"^/+", "/", n)])
-    return not any(c.startswith(p) for c in candidates for p in disallowed_prefixes)
+    return not any(_robots_path_match(c, p)
+                   for c in candidates for p in disallowed_prefixes)
 
 
 def recover_filename(cd_name):
@@ -262,6 +292,10 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
     d = real_d
     attach_hashes = []
     for idx, f in enumerate(attachments):
+        if f.get("download_status"):
+            # 사전 마킹된 항목(예: 계약 미확정 외부 시스템 링크
+            # "skipped_unverified") — 다운로드하지 않고 상태를 보존한다.
+            continue
         if not robots_allowed(f["url"], robots_disallowed_prefixes):
             f["download_status"] = "skipped_robots"
             print(f"[{tag}] robots 불허 경로 — 다운로드 생략(링크만): "

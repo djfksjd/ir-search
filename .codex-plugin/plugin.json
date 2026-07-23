@@ -1,6 +1,6 @@
 {
   "name": "ir-search",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "한국 정부·공공기관 지원사업 전수조사 스킬 — K-Startup·기업마당·NIPA·KOCCA·SMTECH 크롤링 후 즉시/로드맵/변형 3분류.",
   "author": {
     "name": "djfksjd",

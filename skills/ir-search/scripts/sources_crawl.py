@@ -19,15 +19,21 @@ Usage:
   python3 sources_crawl.py detail <bizinfo-url> -o details/ \
       --download-dir attachments/ [--merge-into bizinfo.jsonl]
 
-Attachment contract (bizinfo detail only for now; sole-search port):
+Attachment contract (bizinfo/NIPA/KOCCA/SMTECH detail; sole-search port):
   --download-dir downloads every attachment with pre-validated redirects
-  (https + bizinfo.go.kr allowlist checked BEFORE each hop, max 5),
-  a 50MB streaming cap and sha256 per file. robots.txt-disallowed paths
-  (/uploads/ → /upload prefix) are recorded as links only (skipped_robots).
+  (https + per-source allowlist AND robots prefixes checked BEFORE each hop,
+  max 5), a 50MB streaming cap, sha256 per file, and a per-announcement
+  subdirectory. robots.txt-disallowed paths are recorded as links only
+  (skipped_robots). Per-source contracts (verified live 2026-07-24, see
+  references/sources.md):
+    bizinfo  /cmm/fms/… downloadable; /uploads/… robots-disallowed
+    nipa     /comm/getFile?… downloadable (no User-agent:* robots block)
+    kocca    popup1 /kocca/noticeFilePop.do → /kocca/noticeFileDown.do
+             downloadable; popup2 pms.kocca.kr link-only (skipped_unverified)
+    smtech   /front/comn/AtchFileDownload.do?atchFileId=… downloadable
   content_hash is stamped hash v3 (body + sorted attachment sha256s) ONLY
   when every download succeeded; otherwise the body-only v2 hash is kept and
   the record gets attachments_complete:false + exit 2 (partial).
-  NIPA/KOCCA/SMTECH attachments are deferred until fixtures exist (#13).
 
 Unified JSONL schema:
   {"source", "id", "title", "field", "org", "apply_start", "apply_end",
@@ -71,13 +77,16 @@ UA = (
 )
 
 
-def follow_redirects(do_request, url, data=None, allowed_domains=None):
+def follow_redirects(do_request, url, data=None, allowed_domains=None,
+                     robots_disallowed=()):
     """Manually follow redirects, validating EVERY hop against the allowlist.
 
     Automatic redirect following is disabled in the transports below: a
     permitted host that 302s to an external host must never make us request
     (let alone save) the external response. Each Location is resolved to an
-    absolute URL and must pass host_allowed (https + allowlist) BEFORE any
+    absolute URL and must pass host_allowed (https + allowlist) — and, when
+    *robots_disallowed* is given, attach_download.robots_allowed (robots
+    prefix/wildcard rules incl. encoding-disguise checks) — BEFORE any
     request goes out; a violating hop raises, failing that request. At most
     MAX_REDIRECTS hops are followed.
 
@@ -86,12 +95,24 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None):
     import urllib.parse
 
     current, body = url, data
+    # 최초 URL도 리다이렉트 대상과 같은 정책으로 요청 전에 검증한다 —
+    # 홉만 검사하면 최초 URL로 차단 대상(pms.kocca.kr, robots 불허 경로)을
+    # 직접 넣는 경로가 뚫린다
+    if not host_allowed(current, allowed_domains):
+        raise RuntimeError(f"initial url not allowed: {current[:80]}")
+    if robots_disallowed and not attach_download.robots_allowed(
+            current, robots_disallowed):
+        raise RuntimeError(f"initial url robots-disallowed: {current[:80]}")
     for _ in range(MAX_REDIRECTS + 1):
         status, text, location = do_request(current, body)
         if status in REDIRECT_STATUSES and location:
             nxt = urllib.parse.urljoin(current, location)
             if not host_allowed(nxt, allowed_domains):
                 raise RuntimeError(f"redirect to non-source url blocked: {nxt[:80]}")
+            if robots_disallowed and not attach_download.robots_allowed(
+                    nxt, robots_disallowed):
+                raise RuntimeError(
+                    f"redirect to robots-disallowed url blocked: {nxt[:80]}")
             if status == 303 or body is not None:
                 body = None  # redirected form submits are re-issued as GET
             current = nxt
@@ -100,12 +121,13 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None):
     raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
 
 
-def make_fetcher(allowed_domains=None):
+def make_fetcher(allowed_domains=None, robots_disallowed=()):
     """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib.
 
     Both transports have automatic redirects DISABLED; the returned fetch
     follows redirects manually via follow_redirects(), so every hop is
-    checked against *allowed_domains* (default: ALLOWED_DOMAINS).
+    checked against *allowed_domains* (default: ALLOWED_DOMAINS) and,
+    when given, *robots_disallowed* prefixes.
     """
     try:
         from curl_cffi import requests as cr
@@ -146,7 +168,8 @@ def make_fetcher(allowed_domains=None):
         backend = "urllib"
 
     def fetch(url, data=None):
-        return follow_redirects(do_request, url, data, allowed_domains)
+        return follow_redirects(do_request, url, data, allowed_domains,
+                                robots_disallowed)
 
     return fetch, backend
 
@@ -415,7 +438,9 @@ def host_allowed(url, domains=None):
     either a typo or a downgrade attempt and is rejected.
 
     *domains* narrows the allowlist (e.g. per-source redirect checks);
-    default is the full ALLOWED_DOMAINS.
+    default is the full ALLOWED_DOMAINS. An entry prefixed with '=' matches
+    the EXACT host only (no subdomain wildcard) — e.g. '=www.kocca.kr' does
+    not admit pms.kocca.kr (attach_download.host_allowed와 동일 규약).
     """
     import urllib.parse
     if domains is None:
@@ -427,7 +452,13 @@ def host_allowed(url, domains=None):
         return False
     if parts.scheme != "https":
         return False
-    return any(host == d or host.endswith("." + d) for d in domains)
+    for d in domains:
+        if d.startswith("="):
+            if host == d[1:]:
+                return True
+        elif host == d or host.endswith("." + d):
+            return True
+    return False
 
 
 # ---- bizinfo 첨부 슬라이스 (sole-search 이식, 2026-07-23 실측) ---------------
@@ -476,6 +507,315 @@ def parse_bizinfo_attachments(h):
              "filename": a.rsplit("/", 1)[-1].split("?")[0]} for a in seen]
 
 
+# ---- NIPA·KOCCA·SMTECH 첨부 계약 (2026-07-24 실호출로 확인 — references/sources.md)
+
+# NIPA robots.txt(2026-07-24): `User-agent: *` 블록이 없다(Googlebot 전용
+# 규칙 /sea·/tota + Allow:/ 뿐) — 우리 크롤러에 적용되는 불허 경로 없음.
+NIPA_ROBOTS_DISALLOWED = ()
+
+# KOCCA robots.txt(2026-07-24) User-agent:* 블록 전사. 첨부 다운로드 엔드포인트
+# /kocca/noticeFileDown.do는 "/*/FileDown.do" 패턴(리터럴 "/FileDown.do" 세그먼트
+# 필요)과 불일치 — 허용. 와일드카드 패턴은 attach_download._robots_path_match가 처리.
+KOCCA_ROBOTS_DISALLOWED = (
+    "/kocca/member/", "/kocca/online", "/*/FileDown.do", "/kocca/counsel/",
+    "/kocca/bbs/view/userInstRegPage.do", "/kocca/bbs/view/regContent.do",
+    "/story/requestResult/", "/story/request/", "/curoms/", "/gamehubpms/",
+    "/ourcharacter/", "/bestgame/", "/seriousgame/", "/gameguide/",
+    "/broadcastdb.", "/cop/", "/portal/", "/kocca/searchList.do",
+    "/kocca/*/list.do", "/kocca/bbs/list/*.do",
+)
+
+# SMTECH robots.txt(2026-07-24) User-agent:* 블록 전사(절대 URL 1건은 경로로 변환).
+# 첨부 다운로드 엔드포인트 /front/comn/AtchFileDownload.do는 목록에 없음 — 허용.
+SMTECH_ROBOTS_DISALLOWED = (
+    "/SBA/SA/SbjtAppl_selectSbjtApplList.do",
+    "/SBA/SA/HealthMngSbjtRcpt_selectSbjtApplPrg.do",
+    "/SBA/ETC/EtcSbjtAppl_forwardEtcSbjtApplList.do",
+    "/SBA/ETC/RechSbjtAppl_forwardRechSbjtApplList.do?RECH_ANCM_ID=S20131",
+    "/SBA/ETC/RechSbjtAppl_forwardRechSbjtApplList.do?RECH_ANCM_ID=S20132",
+    "/SBA/SA/SbjtAppl_selectSbjtPtcpList.do?gMenu=SBA",
+    "/SBA/SA/SA_SbjtMbrSprtAncmList.do", "/SBA/SA/SA_SbjtNseeTdpList.do",
+    "/sba/ee/ElecEvalSbjtLst.do", "/sba/se/OnlineEval.do",
+    "/sba/se/SvorgnSelfEval.do",
+    "/SBA/RE/PosnRechEqpm_getPosnRechEqpmMain.do",
+    "/SBA/RE/RechEqpmRead_getRechEqpmRead.do",
+    "/SBA/RE/BexpPayReq_viewBexpPayReq.do",
+    "/SBA/RE/RechEqpmUseSituSv_viewRechEqpmUseSitu.do",
+    "/SBA/RE/RechEqpmRevSv_viewRechEqpmRev.do",
+    "/SBA/RE/PtcpReqListSv_viewPtcpReqList.do",
+    "/SBA/RE/RechEqpmMentor_viewMentorList.do",
+    "/SBA/RE/RechEqpmMentorAns_viewMentoringList.do",
+    "/SBA/RE/VchrReqSitu_viewVchrReqSitu.do",
+    "/SBA/RE/RechEqpmRev_viewRechEqpmRev.do",
+    "/SBA/RE/RechEqpmUseSitu_viewRechEqpmUseSitu.do",
+    "/SBA/RE/OftnUseEqpm_viewOftnUseEqpm.do",
+    "/SBA/RE/PtcpReqList_viewPtcpReqList.do",
+    "/SBA/RE/PtcpObjtSbjt_selectPtcpObjtSbjt.do",
+    "/SBA/RE/RechEqpmMentoring_viewMentoringList.do",
+    "/SBA/EA/AgreAppl_selectAgreWrtSbjt.do",
+    "/SBA/EA/StepAgreAppl_selectAgreWrtSbjt.do",
+    "/SBA/EA/AgreChng_selectAgreChngObjtSbjt.do",
+    "/SBA/EA/ChrgrChng_selectChrgrChngSbjtLst.do",
+    "/SBA/EA/MngAdmn_viewMngAdmn.do", "/SBA/EA/AgreRead_selectAgreRead.do",
+    "/SBA/RR/PrgrtRptpLst_getPrgrtRptLst.do",
+    "/SBA/RR/StepRptpLst_getStepRptLst.do",
+    "/SBA/RR/LastRptpLst_getLastRptLst.do",
+    "/SBA/RR/MngRsltRptp_viewMngRsltRptp.do",
+    "/SBA/RN/RechNoteList_viewRechNoteList.do",
+    "/SBA/FA/RechMtrsEstmAdmn.do", "/SBA/FA/KldgPrgtAdmn.do",
+    "/SBA/FA/SbjtThesAdmn.do", "/sba/sc/SmbaSancAct.do",
+    "/sba/sc/OgovdSancAct.do",
+    "/SBA/DR/DemResearch_forwardDemResearchApplMain.do",
+    "/SBA/DR/DemResearch_forwardDemResearchApplTeclMain.do",
+    "/main/bankLoginGW.do", "/main/bankFrame.do",
+    "/OSA/BR/BR_RtrtGuid.do", "/OSA/BR/BR_RtrtSituRead.do",
+    "/OSA/BR/BR_PntRtrt.do", "/OSA/BR/BR_CardRtrt.do",
+    "/OSA/BR/BR_CardCanRtrt.do", "/OSA/BR/BR_StaxRtrt.do",
+    "/OSA/BR/BR_TrstDvlpRtrt.do", "/OSA/PS/PS_PaymPlanRead.do",
+    "/OSA/PS/PaymPlanWriteRead.do", "/OSA/OS/OS_CommEvdn.do",
+    "/OSA/OS/OS_ExecBrdnRead.do", "/OSA/OS/OS_SetlRpt.do",
+    "/OSA/OS/OS_SetlRslt.do", "/csg/qn/qna_list.do",
+    "/csg/hi/confirmationInfo.do", "/csg/hi/confirmation.do",
+    "/gpin/gPinAuthRequest.do", "/front/nmbi/", "/nmbi/",
+    "/csg/cr/crn_list.do", "/csg/id/insusDclr.do",
+    "/csg/id/insusDclr_safDclr.do",
+)
+
+# 첨부 다운로드 허용 호스트 — **정확한 호스트만**('=' 접두, 실측값). 페이지
+# 크롤링(SOURCE_DOMAINS)과 달리 서브도메인 와일드카드를 배제한다: kocca.kr로
+# 두면 계약 미확정 pms.kocca.kr로의 리다이렉트가 host 검사를 통과해 버린다.
+ATTACH_HOSTS = {
+    "bizinfo": ("=www.bizinfo.go.kr", "=bizinfo.go.kr"),
+    "nipa": ("=www.nipa.kr", "=nipa.kr"),
+    "kocca": ("=www.kocca.kr",),  # pms.kocca.kr 등 서브도메인 배제(계약 미확정)
+    "smtech": ("=www.smtech.go.kr", "=smtech.go.kr"),
+}
+
+# 첨부 슬라이스 소스별 설정: robots 불허 접두, 공고 id 추출, 본문 마커.
+ATTACH_ROBOTS = {
+    "bizinfo": BIZINFO_ROBOTS_DISALLOWED,
+    "nipa": NIPA_ROBOTS_DISALLOWED,
+    "kocca": KOCCA_ROBOTS_DISALLOWED,
+    "smtech": SMTECH_ROBOTS_DISALLOWED,
+}
+ATTACH_ID_PATTERNS = {
+    "bizinfo": r"pblancId=(PBLN_\d+)",
+    "nipa": r"/home/2-2/(\d+)",
+    "kocca": r"intcNo=([A-Za-z0-9]+)",
+    "smtech": r"ancmId=([A-Za-z0-9]+)",
+}
+# 본문 시작/끝 마커 (컨테이너 실측 2026-07-24; bizinfo는 2026-07-23)
+BODY_MARKERS = {
+    "bizinfo": (BIZINFO_START_MARKERS, BIZINFO_END_MARKERS),
+    "nipa": ((r'<div[^>]+class="[^"]*tbWrap[^"]*gonggo[^"]*"',
+              r'<div[^>]+class="[^"]*hwp_editor_board_content[^"]*"'),
+             (r'<footer\b', r'<div[^>]+id="footer"')),
+    "kocca": ((r'<div[^>]+id="contents_body"',),
+              (r'<footer\b', r'<div[^>]+id="footer"')),
+    "smtech": ((r'<div[^>]+id="subcontent"',),
+               (r'<div[^>]+id="footer"', r'<footer\b')),
+}
+
+
+def parse_nipa_attachments(h):
+    """NIPA 상세의 첨부(/comm/getFile?...) — 실측 2026-07-24.
+
+    <a href="/comm/getFile?srvcId=...&fileNo=...">파일명.hwp (파일크기: 134 KB)</a>
+    앵커 텍스트에서 '(파일크기: …)' 꼬리를 제거해 파일명을 얻는다."""
+    out, seen = [], set()
+    for m in re.finditer(r'href="(/comm/getFile\?[^"]+)"[^>]*>([\s\S]*?)</a>', h):
+        url = "https://www.nipa.kr" + htmllib.unescape(m.group(1))
+        if url in seen:
+            continue
+        seen.add(url)
+        name = clean(re.sub(r"<[^>]+>", " ",
+                            re.sub(r"\(파일크기[\s\S]*$", "", m.group(2))))
+        out.append({"url": url, "filename": name or None})
+    return out
+
+
+def parse_smtech_attachments(h):
+    """SMTECH 상세의 첨부 — 실측 2026-07-24.
+
+    <a ... onclick="cfn_AtchFileDownload('<ID>','/front','fileDownFrame')">파일명</a>
+    (href="javascript:cfn_..." 변형 포함). 다운로드 URL은 common.js의
+    cfn_AtchFileDownloadUrl 계약: <context>/comn/AtchFileDownload.do?atchFileId=<ID>"""
+    out, seen = [], set()
+    for m in re.finditer(
+            r"<a[^>]*cfn_AtchFileDownload\('([0-9A-Fa-f]+)'\s*,\s*'([^']*)'"
+            r"[^>]*>([\s\S]*?)</a>", h):
+        fid, ctx = m.group(1), m.group(2) or "/front"
+        url = f"https://www.smtech.go.kr{ctx}/comn/AtchFileDownload.do?atchFileId={fid}"
+        if url in seen:
+            continue
+        seen.add(url)
+        name = clean(re.sub(r"<[^>]+>", " ", m.group(3)))
+        out.append({"url": url, "filename": name or None})
+    return out
+
+
+def fetch_kocca_popup(purl):
+    """KOCCA 파일 팝업 조회 — attach_download.open_validated 경유:
+    각 리다이렉트 홉이 **정확한 호스트(ATTACH_HOSTS) + robots 불허 접두** 검사를
+    요청 전에 통과해야 한다. 팝업이 /kocca/bbs/FileDown.do(robots 불허)나
+    pms.kocca.kr로 302해도 요청이 나가지 않는다.
+    401/403은 다운로드 경로와 동일하게 ManualEscalation(차단 신호 — exit 3)."""
+    import urllib.error
+    try:
+        with attach_download.open_validated(
+                purl, ATTACH_HOSTS["kocca"], timeout=30,
+                robots_disallowed=KOCCA_ROBOTS_DISALLOWED) as r:
+            status = getattr(r, "status", None) or 200
+            return status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise attach_download.ManualEscalation(
+                f"kocca 파일팝업 HTTP {e.code}") from e
+        raise
+
+
+def _kocca_popup_looks_valid(ph):
+    """파일 행 0건인 팝업이 '정상 빈 팝업'인지 판별 — 실측(2026-07-24) 기준
+    빈 팝업은 '해당자료가 존재하지 않습니다' 명시 문구를 가진다. **명시 문구만**
+    승인한다: '공고관련자료'/board_write01 같은 레이아웃 마커는 Access Denied·
+    파일행 마크업 개편 페이지에도 남을 수 있어, 행 0건 + 레이아웃 마커만으로
+    '첨부 없음'을 승인하면 fail-open이 된다 — 그 경우는 차단/개편 의심으로
+    fail-closed(첨부 유무 불명)."""
+    return "해당자료가 존재하지 않습니다" in ph
+
+
+def parse_kocca_attachments(h, popup_fetch=None):
+    """KOCCA 상세의 첨부 — 실측 2026-07-24. 상세 페이지에는 파일이 직접 없고
+    팝업 2종을 경유한다:
+
+    1. openNoticeFileList1('<intcNo>') → /kocca/noticeFilePop.do?intcNo=…
+       (robots 허용) — 팝업을 추가로 fetch(fetch_kocca_popup: 홉별 정확한
+       호스트+robots 검증)해 fn_fileDownload('<intc>','<seq>') 행을 파싱한다.
+       다운로드 URL: /kocca/noticeFileDown.do?intcNo=…&seqNo=…
+       ("/*/FileDown.do" robots 패턴과 리터럴 불일치 — 허용)
+       **팝업 조회 실패는 fail-closed**: 첨부 유무를 알 수 없으므로 해당
+       팝업을 download_status "failed" 마커로 기록한다 → complete가 false로
+       남아 본문 v2 + attachments_complete:false + exit 2로 강등된다.
+    2. openNoticeFileList2('<pblancId>') → pms.kocca.kr(별도 PMS 시스템, JS
+       팝업) — 다운로드 계약 미확정: 링크만 기록(download_status
+       "skipped_unverified") → attachments_complete는 false로 남는다(fail-closed).
+    """
+    if popup_fetch is None:
+        popup_fetch = fetch_kocca_popup
+    out, seen = [], set()
+    for intc in dict.fromkeys(re.findall(r"openNoticeFileList1\('([^']+)'\)", h)):
+        purl = ("https://www.kocca.kr/kocca/noticeFilePop.do?intcNo="
+                + urllib_quote(intc))
+        try:
+            status, ph = popup_fetch(purl)
+            if status != 200:
+                raise RuntimeError(f"HTTP {status}")
+        except attach_download.ManualEscalation:
+            raise
+        except Exception as e:  # noqa: BLE001 — fail-closed: 첨부 유무 불명
+            out.append({"url": purl, "filename": None,
+                        "download_status": "failed",
+                        "download_reason": f"popup fetch failed: {e}"})
+            print(f"WARNING [ir-search] kocca 파일팝업 실패 — 첨부 미확인, "
+                  f"partial로 강등: {purl[:70]}: {e}", file=sys.stderr)
+            time.sleep(DELAY)
+            continue
+        rows = list(re.finditer(
+            r"<a[^>]*fn_fileDownload\('([^']+)'\s*,\s*'?(\d+)'?\)"
+            r"[^>]*>([\s\S]*?)</a>", ph))
+        if not rows and not _kocca_popup_looks_valid(ph):
+            # 200이지만 예상 구조가 아니다(Access Denied/개편 의심) —
+            # 파일 행 0건을 "첨부 없음"으로 오인하면 fail-open이 된다.
+            out.append({"url": purl, "filename": None,
+                        "download_status": "failed",
+                        "download_reason": "popup parsed 0 rows and expected "
+                                           "structure markers missing — "
+                                           "차단/개편 의심 (fail-closed)"})
+            print(f"WARNING [ir-search] kocca 파일팝업 구조 미확인(행 0건) — "
+                  f"첨부 미확인, partial로 강등: {purl[:70]}", file=sys.stderr)
+            time.sleep(DELAY)
+            continue
+        for m in rows:
+            url = ("https://www.kocca.kr/kocca/noticeFileDown.do?intcNo="
+                   f"{urllib_quote(m.group(1))}&seqNo={m.group(2)}")
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append({"url": url,
+                        "filename": clean(re.sub(r"<[^>]+>", " ", m.group(3)))
+                        or None})
+        time.sleep(DELAY)
+    for pid in dict.fromkeys(re.findall(r"openNoticeFileList2\('([^']+)'\)", h)):
+        url = ("https://pms.kocca.kr/pblanc/pblancPopupViewPage.do?pblancId="
+               + urllib_quote(pid))
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"url": url, "filename": None,
+                    "download_status": "skipped_unverified",
+                    "download_reason": "pms.kocca.kr 팝업 — 다운로드 계약 미확정 "
+                                       "(링크만 기록)"})
+    return out
+
+
+def urllib_quote(s):
+    import urllib.parse
+    return urllib.parse.quote(str(s), safe="")
+
+
+def collect_attachments(source, h):
+    if source == "bizinfo":
+        return parse_bizinfo_attachments(h)
+    if source == "nipa":
+        return parse_nipa_attachments(h)
+    if source == "smtech":
+        return parse_smtech_attachments(h)
+    if source == "kocca":
+        # 팝업 조회는 fetch_kocca_popup(open_validated: 홉별 정확한 호스트
+        # + robots 검사) 경유 — 페이지 fetch를 재사용하지 않는다.
+        return parse_kocca_attachments(h)
+    return []
+
+
+def source_of_url(url):
+    for name, domains in SOURCE_DOMAINS.items():
+        if host_allowed(url, domains):
+            return name
+    return None
+
+
+def make_detail_fetcher():
+    """detail 페이지용 fetcher — URL의 소스를 판별해 **첨부와 동일한 호스트
+    정책(ATTACH_HOSTS: 정확한 호스트, KOCCA는 =www.kocca.kr만)** + 소스별
+    robots 불허 접두(ATTACH_ROBOTS)를 리다이렉트 홉 검사에 적용한다.
+    정상 상세 페이지가 pms.kocca.kr나 /kocca/bbs/FileDown.do(robots 불허)로
+    302해도 요청이 나가지 않는다. 4개 소스 밖의 허용 URL(K-Startup 등)은
+    기존 전체 허용 리스트 fetcher로 폴백한다."""
+    fetchers = {}
+    shown = [False]
+
+    def get(source):
+        if source not in fetchers:
+            if source is None:
+                f, backend = make_fetcher()
+            else:
+                f, backend = make_fetcher(ATTACH_HOSTS[source],
+                                          ATTACH_ROBOTS[source])
+            if not shown[0]:
+                print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
+                if backend == "urllib":
+                    print("[ir-search] tip: pip install 'curl_cffi>=0.15' "
+                          "if requests get blocked", file=sys.stderr)
+                shown[0] = True
+            fetchers[source] = f
+        return fetchers[source]
+
+    def fetch(url, data=None):
+        return get(source_of_url(url))(url, data)
+
+    return fetch
+
+
 def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete,
                  hash_version):
     """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
@@ -505,16 +845,21 @@ def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete
 def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     """Save the text of announcement detail pages (any source) for eligibility checks.
 
-    With --download-dir (bizinfo detail URLs only for now): also collects the
-    attachment links, downloads them under the sole-search security contract
-    (pre-validated redirects, 50MB cap, sha256) and stamps hash v3
-    (body + sorted attachment sha256s) ONLY when every download succeeded.
-    Any failed/blocked/robots-skipped attachment keeps the body-only v2 hash
+    With --download-dir (bizinfo/NIPA/KOCCA/SMTECH detail URLs): also collects
+    the attachment links per the source contracts verified live on 2026-07-24
+    (see references/sources.md), downloads them under the sole-search security
+    contract (pre-validated redirects incl. robots on every hop, 50MB cap,
+    sha256, per-announcement subdir) and stamps hash v3 (body + sorted
+    attachment sha256s) ONLY when every download succeeded. Any failed/
+    blocked/robots-skipped/unverified attachment keeps the body-only v2 hash
     with attachments_complete=false and turns the run into partial (exit 2).
-    NIPA/KOCCA/SMTECH attachment support is deferred until per-source fixtures
-    exist (issue #13 agreement); their pages are saved text-only as before.
+    KOCCA popup-2 attachments (pms.kocca.kr) are link-only
+    ("skipped_unverified") until that contract is verified.
 
-    Exits 2 if any URL fails; a per-URL success/failure summary goes to stderr.
+    Exit codes: 0 all ok / 2 any URL failed or attachments incomplete /
+    3 blocked-signal (attachment or popup HTTP 401/403 → ManualEscalation —
+    the record is still merged as v2 + attachments_complete:false first).
+    A per-URL success/failure summary goes to stderr.
     """
     import hashlib
     import json as _json
@@ -537,27 +882,36 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
             path = f"{outdir}/{name}_{digest8}.txt"
 
-            is_bizinfo = host_allowed(url, SOURCE_DOMAINS["bizinfo"])
-            if (download_dir or merge_into) and not is_bizinfo:
-                print("[ir-search] NOTE: 첨부 다운로드/병합은 현재 bizinfo 상세만 "
-                      "지원 (K-Startup은 kstartup_crawl.py detail --download-dir; "
-                      "NIPA/KOCCA/SMTECH는 fixture 확보 후) — 본문만 저장: "
-                      f"{url[:60]}", file=sys.stderr)
+            source = source_of_url(url)
+            if (download_dir or merge_into) and source is None:
+                print("[ir-search] NOTE: 이 소스는 첨부 다운로드/병합 미지원 "
+                      "(K-Startup은 kstartup_crawl.py detail --download-dir) — "
+                      f"본문만 저장: {url[:60]}", file=sys.stderr)
 
-            if is_bizinfo and (download_dir or merge_into):
-                m = re.search(r"pblancId=(PBLN_\d+)", url)
+            if source is not None and (download_dir or merge_into):
+                m = re.search(ATTACH_ID_PATTERNS[source], url)
                 rec_id = m.group(1) if m else None
-                attachments = parse_bizinfo_attachments(h)
-                text = extract_body(h)
+                manual = None
+                try:
+                    attachments = collect_attachments(source, h)
+                except attach_download.ManualEscalation as e:
+                    # 팝업 401/403 등 차단 신호 — 첨부 유무 불명. 병합 없이
+                    # 끊으면 재시도 파일의 과거 v3/true가 잔존하므로 failed
+                    # 마커로 기록하고 v2/incomplete 병합 후 exit 3.
+                    manual = e
+                    attachments = [{"url": url, "filename": None,
+                                    "download_status": "failed",
+                                    "download_reason": f"manual: {e}"}]
+                start_markers, end_markers = BODY_MARKERS[source]
+                text = extract_body(h, start_markers, end_markers)
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
                 hash_version = attach_download.HASH_VERSION_BODY
                 complete = not attachments  # 링크만 수집: 첨부가 있으면 미검증
-                manual = None
-                if download_dir and attachments:
+                if download_dir and attachments and manual is None:
                     try:
                         attach_hashes = attach_download.process_attachments(
                             attachments, download_dir, DELAY,
-                            SOURCE_DOMAINS["bizinfo"], BIZINFO_ROBOTS_DISALLOWED,
+                            ATTACH_HOSTS[source], ATTACH_ROBOTS[source],
                             subdir=rec_id or digest8)  # 공고별 폴더 — 동명 충돌 방지
                     except attach_download.ManualEscalation as e:
                         # 401/403 — 우회하지 않는다. 단, 여기서 끊고 나가면
@@ -588,7 +942,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                             + _json.dumps(attachments, ensure_ascii=False) + "\n\n")
                     f.write(text)
                 if merge_into:
-                    if rec_id and not merge_detail(merge_into, "bizinfo", rec_id,
+                    if rec_id and not merge_detail(merge_into, source, rec_id,
                                                    content_hash, attachments,
                                                    complete, hash_version):
                         results.append((url, f"FAIL merge: {rec_id} not in "
@@ -627,6 +981,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             print(f"[ir-search] {url[:60]}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
     failures = [r for r in results if r[1].startswith(("FAIL", "PARTIAL"))]
+    manuals = [r for r in results if r[1].startswith("FAIL MANUAL")]
     print(
         f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
         f"{len(failures)} failed/partial",
@@ -634,6 +989,8 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     )
     for url, res in results:
         print(f"[ir-search]   {url[:70]}: {res}", file=sys.stderr)
+    if manuals:
+        sys.exit(3)  # 차단 신호(401/403) — 우회하지 않고 수동 확인으로 전환
     if failures:
         sys.exit(2)
 
@@ -660,25 +1017,20 @@ def main():
     p_det.add_argument("-o", "--output", default="details")
     p_det.add_argument(
         "--download-dir",
-        help="bizinfo 첨부를 이 폴더에 다운로드 — 전부 성공 시에만 hash v3 스탬프, "
-        "불완전이면 본문 v2 유지 + attachments_complete:false + exit 2",
+        help="bizinfo/NIPA/KOCCA/SMTECH 첨부를 이 폴더에(공고별 하위 폴더) "
+        "다운로드 — 전부 성공 시에만 hash v3 스탬프, 불완전이면 본문 v2 유지 "
+        "+ attachments_complete:false + exit 2",
     )
     p_det.add_argument(
         "--merge-into",
-        help="bizinfo 목록 jsonl에 content_hash/hash_version/attachments를 병합",
+        help="목록 jsonl에 content_hash/hash_version/attachments를 병합",
     )
 
     args = ap.parse_args()
 
     if args.cmd == "detail":
-        # Detail URLs may point at any permitted source → full allowlist.
-        fetch, backend = make_fetcher()
-        print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
-        if backend == "urllib":
-            print(
-                "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
-                file=sys.stderr,
-            )
+        # 소스별 정확한 호스트 + robots 홉 검사 fetcher (첨부와 동일 정책)
+        fetch = make_detail_fetcher()
         cmd_detail(fetch, args.urls, args.output,
                    download_dir=args.download_dir, merge_into=args.merge_into)
         return
