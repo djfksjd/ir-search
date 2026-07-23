@@ -464,18 +464,32 @@ def cmd_detail(args):
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
                 hash_version = attach_download.HASH_VERSION_BODY
                 complete = not attachments
+                manual = None
                 if download_dir and attachments:
-                    attach_hashes = attach_download.process_attachments(
-                        attachments, download_dir, DELAY, ALLOWED_DOMAINS,
-                        KSTARTUP_ROBOTS_DISALLOWED)
-                    complete = all(f.get("download_status") == "ok"
-                                   for f in attachments)
-                    if complete:
-                        content_hash = attach_download.content_hash_of(
-                            text, attach_hashes)
-                        hash_version = attach_download.HASH_VERSION_ATTACH
-                    # else: 본문 v2 유지 — None으로 지우면 반복 실패 사이의
-                    # 본문 변경이 diff에서 숨는다.
+                    try:
+                        attach_hashes = attach_download.process_attachments(
+                            attachments, download_dir, DELAY, ALLOWED_DOMAINS,
+                            KSTARTUP_ROBOTS_DISALLOWED,
+                            subdir=sn)  # 공고별 폴더 — 동명 첨부 충돌 방지
+                    except attach_download.ManualEscalation as e:
+                        # 401/403 — 우회 금지. 병합 없이 끊으면 재시도 파일의
+                        # 과거 v3/complete:true가 잔존한다 — v2/incomplete를
+                        # 병합하고 partial로 계속한다.
+                        manual = e
+                        for f in attachments:
+                            if "download_status" not in f:
+                                f["download_status"] = "failed"
+                                f["download_reason"] = f"manual: {e}"
+                        complete = False
+                    else:
+                        complete = all(f.get("download_status") == "ok"
+                                       for f in attachments)
+                        if complete:
+                            content_hash = attach_download.content_hash_of(
+                                text, attach_hashes)
+                            hash_version = attach_download.HASH_VERSION_ATTACH
+                        # else: 본문 v2 유지 — None으로 지우면 반복 실패 사이의
+                        # 본문 변경이 diff에서 숨는다.
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(DETAIL_URL.format(sn=sn) + "\n")
                     f.write("CONTENT_HASH: " + content_hash + "\n")
@@ -491,7 +505,12 @@ def cmd_detail(args):
                           "못 찾음", file=sys.stderr)
                     time.sleep(DELAY)
                     continue
-                if not complete:
+                if manual is not None:
+                    results.append((sn, f"FAIL MANUAL {manual}"))
+                    print(f"MANUAL [ir-search] {sn}: 첨부 401/403 — 우회하지 않고 "
+                          f"수동 확인으로 전환 (v2/incomplete 병합 완료): {manual}",
+                          file=sys.stderr)
+                elif not complete:
                     skipped = [f for f in attachments
                                if f.get("download_status") != "ok"]
                     results.append((sn, f"PARTIAL attachments incomplete "

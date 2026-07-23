@@ -81,12 +81,16 @@ def host_allowed(url, allowed_hosts):
     return any(host == a or host.endswith("." + a) for a in allowed_hosts)
 
 
-def open_validated(url, allowed_hosts, timeout):
+def open_validated(url, allowed_hosts, timeout, robots_disallowed=()):
     """자동 리다이렉트 없이 열고, 각 Location을 **요청을 보내기 전에** 절대 URL로
-    해석해 https+허용 호스트 검사를 통과할 때만 최대 5홉 수동 추적한다.
-    위반 시 RedirectBlocked — 외부 호스트로는 요청 자체가 나가지 않는다."""
+    해석해 https+허용 호스트 + robots 불허 접두(경로) 검사를 통과할 때만 최대
+    5홉 수동 추적한다. 위반 시 RedirectBlocked — 외부 호스트로도, robots 불허
+    경로로도 요청 자체가 나가지 않는다 (예: /cmm/fms/ → 302 → /uploads/…
+    같은 동일 호스트 리다이렉트로 robots를 우회할 수 없다)."""
     if not host_allowed(url, allowed_hosts):
         raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
+    if not robots_allowed(url, robots_disallowed):
+        raise RedirectBlocked(f"robots 불허 경로 — 요청 차단: {url[:80]}")
     for _ in range(MAX_REDIRECTS + 1):
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         try:
@@ -101,6 +105,9 @@ def open_validated(url, allowed_hosts, timeout):
             nxt = urllib.parse.urljoin(url, loc)
             if not host_allowed(nxt, allowed_hosts):
                 raise RedirectBlocked(f"리다이렉트 대상 불허 — 요청 차단: {nxt[:80]}")
+            if not robots_allowed(nxt, robots_disallowed):
+                raise RedirectBlocked(
+                    f"리다이렉트 대상이 robots 불허 경로 — 요청 차단: {nxt[:80]}")
             url = nxt
     raise RedirectBlocked(f"리다이렉트 {MAX_REDIRECTS}홉 초과: {url[:80]}")
 
@@ -142,16 +149,19 @@ def recover_filename(cd_name):
     return cd_name
 
 
-def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts):
+def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts,
+                        robots_disallowed=()):
     """보안 계약: 요청 전 host_allowed(https 강제 포함) + 각 리다이렉트 Location을
-    **요청 전에** 검증(open_validated, 위반 시 RedirectBlocked)
-    + 50MB 스트리밍 상한 + 실패 시 부분 파일 삭제. 저장 경로를 반환한다."""
+    **요청 전에** 검증(open_validated — 허용 호스트와 robots 불허 접두 모두,
+    위반 시 RedirectBlocked) + 50MB 스트리밍 상한 + 실패 시 부분 파일 삭제.
+    저장 경로를 반환한다."""
     if not host_allowed(url, allowed_hosts):
         raise RuntimeError(f"첨부 URL host/scheme 불허: {url[:80]}")
     dirpath = str(pathlib.Path(dirpath).resolve())
     path = None
     try:
-        with open_validated(url, allowed_hosts, timeout=60) as r:
+        with open_validated(url, allowed_hosts, timeout=60,
+                            robots_disallowed=robots_disallowed) as r:
             # 사전 검증이 1차 방어 — geturl 재검사는 심층 방어로 유지한다
             final = r.geturl() if hasattr(r, "geturl") else url
             if not host_allowed(final, allowed_hosts):
@@ -187,15 +197,27 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts):
         raise
 
 
+def safe_subdir(name):
+    """공고 식별자를 하위 폴더명으로 정제 — 경로 구분자·제어문자 제거."""
+    return re.sub(r"[^\w.\-가-힣]", "_", str(name))[:80] or "_"
+
+
 def process_attachments(attachments, download_dir, delay, allowed_hosts,
-                        robots_disallowed_prefixes, tag="ir-search"):
+                        robots_disallowed_prefixes, tag="ir-search",
+                        subdir=None):
     """첨부 목록을 다운로드하고 sha256 목록을 반환한다.
+
+    *subdir*(공고 식별자 — pblancId/pbancSn 등)를 주면 download_dir 아래
+    공고별 하위 폴더에 저장한다 — 여러 공고의 동명 첨부(00_공고문.pdf 등)가
+    서로 덮어쓰는 것을 막는다. local_path는 실제 저장 경로를 기록한다.
 
     각 항목 dict에 download_status(ok/failed/blocked_redirect/skipped_robots),
     sha256, local_path를 기록한다. 텍스트 추출은 이 라운드 범위 밖 —
     hash v3 판단은 download_status "ok" 전건 여부만 본다.
     ManualEscalation(401/403)은 그대로 올린다(호출부가 수동 전환 처리)."""
     d = pathlib.Path(download_dir).resolve()
+    if subdir is not None:
+        d = d / safe_subdir(subdir)
     d.mkdir(parents=True, exist_ok=True)
     attach_hashes = []
     for idx, f in enumerate(attachments):
@@ -207,7 +229,8 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
         time.sleep(delay)
         try:
             path = download_attachment(f["url"], d, f.get("filename"), idx,
-                                       allowed_hosts)
+                                       allowed_hosts,
+                                       robots_disallowed=robots_disallowed_prefixes)
         except ManualEscalation:
             raise  # 차단 신호 — 호출부에서 수동 전환
         except RedirectBlocked as e:

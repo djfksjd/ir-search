@@ -120,3 +120,63 @@ def test_invalid_records_rejected(schema, fixture_lines, mutate, reason):
     rec = json.loads(json.dumps(fixture_lines[1]))  # attachments가 있는 CHANGED 건
     mutate(rec)
     assert validate(rec, schema), f"위반이 통과됨: {reason}"
+
+
+# ---- 실제 diff 출력이 스키마에 부합 (Codex 게이트 #3 회귀) --------------------
+
+def write_jsonl(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def test_actual_diff_output_conforms_to_schema(schema, diff_surveys,
+                                               monkeypatch, tmp_path):
+    """ir diff의 --out(및 gone_) 실제 출력 전 라인이 스키마를 통과한다 —
+    NEW/CHANGED(content_hash)/CHANGED(hash_version 전환)/NEEDS_REHASH/GONE."""
+    def ks(sn, title, **extra):
+        return {"pbancSn": str(sn), "title": title, "start": "2026-07-01",
+                "deadline": "2026-07-31",
+                "url": f"https://www.k-startup.go.kr/x?pbancSn={sn}", **extra}
+
+    def biz(i, title, **extra):
+        return {"source": "bizinfo", "id": f"PBLN_{i}", "title": title,
+                "apply_start": "2026-07-01", "apply_end": "2026-08-31",
+                "url": f"https://www.bizinfo.go.kr/x?pblancId=PBLN_{i}", **extra}
+
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [
+        ks(1, "본문 변경", content_hash="aaa", hash_version=2),
+        ks(2, "산식 전환", content_hash="bbb", hash_version=2),
+        ks(3, "해시 소실", content_hash="ccc", hash_version=2),
+        ks(4, "소멸 예정"),
+    ])
+    write_jsonl(prev / "bizinfo.jsonl", [biz(1, "그대로")])
+    write_jsonl(curr / "kstartup.jsonl", [
+        ks(1, "본문 변경", content_hash="zzz", hash_version=2),
+        ks(2, "산식 전환", content_hash="v3h", hash_version=3,
+           attachments=[{"url": "https://www.k-startup.go.kr/afile/fileDownload/K",
+                         "filename": "공고문.pdf",
+                         "download_status": "skipped_robots"}],
+           attachments_complete=False),
+        ks(3, "해시 소실"),
+        ks(5, "신규"),
+    ])
+    write_jsonl(curr / "bizinfo.jsonl", [biz(1, "그대로")])
+    out = tmp_path / "new_items.jsonl"
+    monkeypatch.setattr("sys.argv", ["diff_surveys.py", str(prev), str(curr),
+                                     "--out", str(out)])
+    diff_surveys.main()
+
+    lines = []
+    for p in (out, out.parent / f"gone_{out.name}"):
+        lines += [json.loads(x) for x in
+                  p.read_text(encoding="utf-8").splitlines()]
+    kinds = sorted(r["kind"] for r in lines)
+    assert kinds == ["CHANGED", "CHANGED", "GONE", "NEEDS_REHASH", "NEW"]
+    for i, rec in enumerate(lines):
+        errs = validate(rec, schema)
+        assert not errs, f"diff 출력 line {i + 1}: {errs}"
+        assert rec["kind"] == rec["diff_status"]
+        assert rec["record"]["source_id"]  # 정규화 보장

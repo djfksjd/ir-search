@@ -297,3 +297,73 @@ def test_kstartup_detail_legacy_format_untouched(kstartup_crawl, monkeypatch,
     kstartup_crawl.cmd_detail(args)
     text = (tmp_path / "details" / "7.txt").read_text(encoding="utf-8")
     assert "CONTENT_HASH:" not in text
+
+
+# ---- 401/403 시에도 v2/incomplete 병합 (Codex 게이트 #4 회귀) -----------------
+
+def test_bizinfo_403_attachment_still_merges_v2_incomplete(
+        sources_crawl, attach_download, monkeypatch, tmp_path):
+    """첨부 403(ManualEscalation) 시에도 merge_detail이 실행돼 재시도 파일의
+    과거 v3/attachments_complete:true가 v2/false로 교체된다. exit 2 유지."""
+    import io
+    import urllib.error
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden",
+                                     email.message.Message(), io.BytesIO(b""))
+
+    html = BIZ_DETAIL_HTML.replace(
+        '<a href="/uploads/legacy/양식.hwp">양식.hwp</a>', "")
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    # 재시도 시나리오: 직전 런이 남긴 v3/complete:true 레코드
+    jsonl = tmp_path / "bizinfo.jsonl"
+    jsonl.write_text(json.dumps({
+        "source": "bizinfo", "id": "PBLN_000000000001", "title": "합성",
+        "url": BIZ_URL, "content_hash": "OLD_V3_HASH", "hash_version": 3,
+        "attachments_complete": True,
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        sources_crawl.cmd_detail(
+            lambda url, data=None: (200, html), [BIZ_URL],
+            str(tmp_path / "details"),
+            download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    assert e.value.code == 2
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False  # 과거 true 잔존 금지
+    assert rec["hash_version"] == 2              # 과거 v3 잔존 금지
+    assert rec["content_hash"] != "OLD_V3_HASH"
+    assert rec["attachments"][0]["download_status"] == "failed"
+    assert "manual" in rec["attachments"][0]["download_reason"]
+
+
+def test_kstartup_403_attachment_still_merges_v2_incomplete(
+        kstartup_crawl, attach_download, monkeypatch, tmp_path):
+    """kstartup 경로도 동일 — ManualEscalation이 병합을 건너뛰지 않는다.
+    (robots 전건 skip이 기본이지만, 접두 목록 변경 등으로 다운로드가 시도될
+    때의 계약을 고정한다.)"""
+    import io
+    import urllib.error
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden",
+                                     email.message.Message(), io.BytesIO(b""))
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    # robots 접두를 비워 다운로드 시도를 강제 (계약 고정용 합성 시나리오)
+    monkeypatch.setattr(kstartup_crawl, "KSTARTUP_ROBOTS_DISALLOWED", ())
+    monkeypatch.setattr(kstartup_crawl, "make_fetcher",
+                        lambda: (lambda url: (200, KS_DETAIL_HTML), "fake"))
+    jsonl = tmp_path / "kstartup_all.jsonl"
+    jsonl.write_text(json.dumps({
+        "pbancSn": "178481", "title": "합성",
+        "content_hash": "OLD", "hash_version": 3, "attachments_complete": True,
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    args = types.SimpleNamespace(
+        pbancSn=["178481"], output=str(tmp_path / "details"),
+        download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    with pytest.raises(SystemExit) as e:
+        kstartup_crawl.cmd_detail(args)
+    assert e.value.code == 2
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False
+    assert rec["hash_version"] == 2

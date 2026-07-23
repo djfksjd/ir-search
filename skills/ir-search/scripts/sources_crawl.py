@@ -545,24 +545,41 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                       f"{url[:60]}", file=sys.stderr)
 
             if is_bizinfo and (download_dir or merge_into):
+                m = re.search(r"pblancId=(PBLN_\d+)", url)
+                rec_id = m.group(1) if m else None
                 attachments = parse_bizinfo_attachments(h)
                 text = extract_body(h)
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
                 hash_version = attach_download.HASH_VERSION_BODY
                 complete = not attachments  # 링크만 수집: 첨부가 있으면 미검증
+                manual = None
                 if download_dir and attachments:
-                    attach_hashes = attach_download.process_attachments(
-                        attachments, download_dir, DELAY,
-                        SOURCE_DOMAINS["bizinfo"], BIZINFO_ROBOTS_DISALLOWED)
-                    complete = all(f.get("download_status") == "ok"
-                                   for f in attachments)
-                    if complete:
-                        # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가
-                        content_hash = attach_download.content_hash_of(
-                            text, attach_hashes)
-                        hash_version = attach_download.HASH_VERSION_ATTACH
-                    # else: 본문만의 v2 해시 유지 — None으로 지우면 반복 실패
-                    # 두 런 사이의 본문 변경이 diff에서 숨는다.
+                    try:
+                        attach_hashes = attach_download.process_attachments(
+                            attachments, download_dir, DELAY,
+                            SOURCE_DOMAINS["bizinfo"], BIZINFO_ROBOTS_DISALLOWED,
+                            subdir=rec_id or digest8)  # 공고별 폴더 — 동명 충돌 방지
+                    except attach_download.ManualEscalation as e:
+                        # 401/403 — 우회하지 않는다. 단, 여기서 끊고 나가면
+                        # merge가 안 돼 재시도 파일의 과거 v3/complete:true가
+                        # 잔존한다 — 본문 v2 + attachments_complete:false를
+                        # 반드시 병합하고 partial(exit 2)로 계속한다.
+                        manual = e
+                        for f in attachments:
+                            if "download_status" not in f:
+                                f["download_status"] = "failed"
+                                f["download_reason"] = f"manual: {e}"
+                        complete = False
+                    else:
+                        complete = all(f.get("download_status") == "ok"
+                                       for f in attachments)
+                        if complete:
+                            # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가
+                            content_hash = attach_download.content_hash_of(
+                                text, attach_hashes)
+                            hash_version = attach_download.HASH_VERSION_ATTACH
+                        # else: 본문만의 v2 해시 유지 — None으로 지우면 반복 실패
+                        # 두 런 사이의 본문 변경이 diff에서 숨는다.
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(url + "\n")
                     f.write("CONTENT_HASH: " + content_hash + "\n")
@@ -571,17 +588,21 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                             + _json.dumps(attachments, ensure_ascii=False) + "\n\n")
                     f.write(text)
                 if merge_into:
-                    m = re.search(r"pblancId=(PBLN_\d+)", url)
-                    if m and not merge_detail(merge_into, "bizinfo", m.group(1),
-                                              content_hash, attachments, complete,
-                                              hash_version):
-                        results.append((url, f"FAIL merge: {m.group(1)} not in "
+                    if rec_id and not merge_detail(merge_into, "bizinfo", rec_id,
+                                                   content_hash, attachments,
+                                                   complete, hash_version):
+                        results.append((url, f"FAIL merge: {rec_id} not in "
                                              f"{merge_into}"))
-                        print(f"[ir-search] WARNING: {m.group(1)} 레코드를 "
+                        print(f"[ir-search] WARNING: {rec_id} 레코드를 "
                               f"{merge_into}에서 못 찾음", file=sys.stderr)
                         time.sleep(DELAY)
                         continue
-                if not complete:
+                if manual is not None:
+                    results.append((url, f"FAIL MANUAL {manual}"))
+                    print(f"MANUAL [ir-search] 첨부 401/403 — 우회하지 않고 수동 "
+                          f"확인으로 전환 (v2/incomplete 병합 완료): {manual}",
+                          file=sys.stderr)
+                elif not complete:
                     bad = [f.get("filename", "?") for f in attachments
                            if f.get("download_status") != "ok"]
                     results.append((url, f"PARTIAL attachments incomplete "

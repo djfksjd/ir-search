@@ -223,3 +223,89 @@ def test_content_hash_of_is_order_independent(attach_download):
     # sole-search sbiz_crawl.content_hash_of와 동일 산식(고정 벡터)
     expected = hashlib.sha256("body\nh1\nh2".encode()).hexdigest()
     assert a == expected
+
+
+# ---- robots는 모든 리다이렉트 홉에 적용 (Codex 게이트 #1 회귀) ----------------
+
+def test_redirect_into_robots_disallowed_path_blocked(attach_download, monkeypatch):
+    """/cmm/fms/ → 302 → /uploads/… 동일 호스트 리다이렉트로 robots를 우회할 수
+    없다 — /uploads에는 요청 자체가 나가지 않는다."""
+    requested = []
+
+    def fake_urlopen(req, timeout):
+        requested.append(req.full_url)
+        raise http_error(req.full_url, 302,
+                         "https://www.bizinfo.go.kr/uploads/secret.hwp")
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    with pytest.raises(attach_download.RedirectBlocked, match="robots 불허"):
+        attach_download.open_validated(
+            "https://www.bizinfo.go.kr/cmm/fms/getFile.do?id=1", HOSTS, 30,
+            robots_disallowed=BIZ_ROBOTS)
+    assert requested == ["https://www.bizinfo.go.kr/cmm/fms/getFile.do?id=1"]
+    assert not any("/uploads" in u for u in requested)
+
+
+def test_redirect_robots_hop_yields_blocked_redirect_status(
+        attach_download, monkeypatch, tmp_path):
+    """process_attachments 경유: robots 불허 경로로의 리다이렉트는
+    blocked_redirect로 기록되고 해시 목록에 들어가지 않는다."""
+    def fake_urlopen(req, timeout):
+        if "/uploads" in req.full_url:
+            raise AssertionError("robots 불허 경로가 요청됐다")
+        raise http_error(req.full_url, 302, "/uploads/evil.hwp")
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    atts = [{"url": "https://www.bizinfo.go.kr/cmm/fms/f", "filename": "f.pdf"}]
+    hashes = attach_download.process_attachments(atts, tmp_path, 0, HOSTS, BIZ_ROBOTS)
+    assert hashes == []
+    assert atts[0]["download_status"] == "blocked_redirect"
+
+
+def test_initial_robots_disallowed_blocked_in_open_validated(attach_download,
+                                                             monkeypatch):
+    """심층 방어: process_attachments의 사전 skip을 우회해 직접 불러도 차단."""
+    def boom(req, timeout):
+        raise AssertionError("robots 불허 경로에 요청이 나갔다")
+
+    monkeypatch.setattr(attach_download, "_urlopen", boom)
+    with pytest.raises(attach_download.RedirectBlocked, match="robots 불허"):
+        attach_download.open_validated(
+            "https://www.bizinfo.go.kr/uploads/a.hwp", HOSTS, 30,
+            robots_disallowed=BIZ_ROBOTS)
+
+
+# ---- 공고별 하위 폴더 — 동명 첨부 충돌 방지 (Codex 게이트 #5 회귀) -------------
+
+def test_same_filename_across_announcements_no_overwrite(attach_download,
+                                                         monkeypatch, tmp_path):
+    """두 공고의 동명 첨부(공고문.pdf)가 서로 덮어쓰지 않고 공고별 폴더에
+    분리 저장되며, 기록된 local_path/sha256이 실제 파일과 일치한다."""
+    def fake_urlopen(req, timeout):
+        data = b"DATA-A" if "aaa" in req.full_url else b"DATA-B"
+        resp = FakeResp(data, headers={
+            "Content-Disposition": 'attachment; filename="공고문.pdf"'},
+            url=req.full_url)
+        return resp
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    a = [{"url": "https://www.bizinfo.go.kr/cmm/fms/aaa", "filename": "공고문.pdf"}]
+    b = [{"url": "https://www.bizinfo.go.kr/cmm/fms/bbb", "filename": "공고문.pdf"}]
+    attach_download.process_attachments(a, tmp_path, 0, HOSTS, BIZ_ROBOTS,
+                                        subdir="PBLN_A")
+    attach_download.process_attachments(b, tmp_path, 0, HOSTS, BIZ_ROBOTS,
+                                        subdir="PBLN_B")
+    pa, pb = a[0]["local_path"], b[0]["local_path"]
+    assert pa != pb
+    import pathlib
+    assert pathlib.Path(pa).read_bytes() == b"DATA-A"  # A가 B에 덮이지 않았다
+    assert pathlib.Path(pb).read_bytes() == b"DATA-B"
+    assert a[0]["sha256"] == hashlib.sha256(b"DATA-A").hexdigest()
+    assert b[0]["sha256"] == hashlib.sha256(b"DATA-B").hexdigest()
+    assert pathlib.Path(pa).parent.name == "PBLN_A"
+    assert pathlib.Path(pb).parent.name == "PBLN_B"
+
+
+def test_safe_subdir_sanitizes_separators(attach_download):
+    assert "/" not in attach_download.safe_subdir("../../etc")
+    assert attach_download.safe_subdir("PBLN_000000000001") == "PBLN_000000000001"
