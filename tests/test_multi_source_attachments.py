@@ -115,12 +115,17 @@ def test_parse_kocca_attachments_popup1_and_popup2(sources_crawl):
     assert pms[0]["download_status"] == "skipped_unverified"
 
 
-def test_parse_kocca_popup_failure_yields_no_phantom_files(sources_crawl):
+def test_parse_kocca_popup_failure_fails_closed(sources_crawl):
+    """popup1 조회 실패(HTTP 500) — 첨부 유무 불명이므로 소거하지 않고
+    download_status "failed" 마커로 기록한다 (→ complete false, exit 2)."""
     def fetch(url, data=None):
         return 500, ""
 
     atts = sources_crawl.parse_kocca_attachments(KOCCA_DETAIL_HTML, fetch)
-    assert all("noticeFileDown" not in a["url"] for a in atts)  # 파일 행 없음
+    assert all("noticeFileDown" not in a["url"] for a in atts)  # 유령 파일 없음
+    failed = [a for a in atts if a.get("download_status") == "failed"]
+    assert len(failed) == 1 and "noticeFilePop" in failed[0]["url"]
+    assert "HTTP 500" in failed[0]["download_reason"]
     assert any("pms.kocca.kr" in a["url"] for a in atts)
 
 
@@ -220,20 +225,18 @@ def test_kocca_detail_pms_popup_keeps_v2_incomplete_exit2(
 
     def fake_urlopen(req, timeout):
         requested.append(req.full_url)
+        if "noticeFilePop" in req.full_url:  # 팝업 조회도 open_validated 경유
+            return FakeResp(KOCCA_POPUP_HTML.encode(), req.full_url)
         return FakeResp(b"FILE", req.full_url)
 
     monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
-
-    def fetch(url, data=None):
-        if "noticeFilePop" in url:
-            return 200, KOCCA_POPUP_HTML
-        return 200, KOCCA_DETAIL_HTML
 
     jsonl = write_rec(tmp_path, "kocca.jsonl",
                       {"source": "kocca", "id": "326D00011111", "title": "합성"})
     with pytest.raises(SystemExit) as e:
         sources_crawl.cmd_detail(
-            fetch, [KOCCA_URL], str(tmp_path / "details"),
+            lambda url, data=None: (200, KOCCA_DETAIL_HTML), [KOCCA_URL],
+            str(tmp_path / "details"),
             download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
     assert e.value.code == 2
     assert not any("pms.kocca.kr" in u for u in requested)  # 미확정 링크 요청 없음
@@ -252,16 +255,18 @@ def test_kocca_detail_popup1_only_all_ok_hash_v3(sources_crawl, attach_download,
     html = KOCCA_DETAIL_HTML.replace(
         "<a href=\"javascript:openNoticeFileList2('76JNATPO10LM1AV000')\">"
         "PMS 첨부</a>", "")
-    monkeypatch.setattr(attach_download, "_urlopen",
-                        lambda req, timeout: FakeResp(b"FILE", req.full_url))
 
-    def fetch(url, data=None):
-        return (200, KOCCA_POPUP_HTML) if "noticeFilePop" in url else (200, html)
+    def fake_urlopen(req, timeout):
+        if "noticeFilePop" in req.full_url:
+            return FakeResp(KOCCA_POPUP_HTML.encode(), req.full_url)
+        return FakeResp(b"FILE", req.full_url)
 
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
     jsonl = write_rec(tmp_path, "kocca.jsonl",
                       {"source": "kocca", "id": "326D00011111", "title": "합성"})
     sources_crawl.cmd_detail(
-        fetch, [KOCCA_URL], str(tmp_path / "details"),
+        lambda url, data=None: (200, html), [KOCCA_URL],
+        str(tmp_path / "details"),
         download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
     rec = json.loads(jsonl.read_text(encoding="utf-8"))
     assert rec["attachments_complete"] is True
@@ -280,3 +285,121 @@ def test_premarked_status_preserved_by_process_attachments(attach_download,
         atts, tmp_path, 0, ("kocca.kr",), ())
     assert hashes == []
     assert atts[0]["download_status"] == "skipped_unverified"
+
+
+# ---- Codex 게이트(PR #15) NO-GO 4건 회귀 --------------------------------------
+
+def test_exact_host_excludes_subdomains(attach_download):
+    """[#1] '=' 접두 정확한 호스트 — pms.kocca.kr 등 서브도메인 매칭 배제."""
+    ok = attach_download.host_allowed
+    assert ok("https://www.kocca.kr/x", ("=www.kocca.kr",))
+    assert not ok("https://pms.kocca.kr/x", ("=www.kocca.kr",))
+    assert not ok("https://kocca.kr/x", ("=www.kocca.kr",))
+    assert not ok("https://evil.www.kocca.kr/x", ("=www.kocca.kr",))
+    # 기존 와일드카드 항목 무회귀
+    assert ok("https://www.bizinfo.go.kr/x", ("bizinfo.go.kr",))
+
+
+def test_attach_hosts_are_exact_for_all_sources(sources_crawl):
+    for src, hosts in sources_crawl.ATTACH_HOSTS.items():
+        assert all(h.startswith("=") for h in hosts), f"{src}: 정확한 호스트 아님"
+    assert sources_crawl.ATTACH_HOSTS["kocca"] == ("=www.kocca.kr",)
+
+
+def test_kocca_download_redirect_to_pms_blocked(sources_crawl, attach_download,
+                                                monkeypatch, tmp_path):
+    """[#1] noticeFileDown.do가 pms.kocca.kr로 302 — 미확정 서브도메인에는
+    요청이 나가지 않고 blocked_redirect로 기록된다."""
+    import io
+    import urllib.error
+    requested = []
+
+    def fake_urlopen(req, timeout):
+        requested.append(req.full_url)
+        hdrs = email.message.Message()
+        hdrs["Location"] = "https://pms.kocca.kr/pblanc/file.do"
+        raise urllib.error.HTTPError(req.full_url, 302, "moved", hdrs,
+                                     io.BytesIO(b""))
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    atts = [{"url": "https://www.kocca.kr/kocca/noticeFileDown.do?intcNo=1&seqNo=1",
+             "filename": "f.hwp"}]
+    attach_download.process_attachments(
+        atts, tmp_path, 0, sources_crawl.ATTACH_HOSTS["kocca"],
+        sources_crawl.KOCCA_ROBOTS_DISALLOWED)
+    assert atts[0]["download_status"] == "blocked_redirect"
+    assert not any("pms.kocca.kr" in u for u in requested)
+
+
+def test_kocca_popup_redirect_to_robots_path_blocked(sources_crawl,
+                                                     attach_download,
+                                                     monkeypatch):
+    """[#2] 팝업 조회가 /kocca/bbs/FileDown.do(robots 불허)로 302 — 홉별
+    robots 검사로 요청 전에 차단되고 failed 마커로 fail-closed."""
+    import io
+    import urllib.error
+    requested = []
+
+    def fake_urlopen(req, timeout):
+        requested.append(req.full_url)
+        hdrs = email.message.Message()
+        hdrs["Location"] = "https://www.kocca.kr/kocca/bbs/FileDown.do?f=1"
+        raise urllib.error.HTTPError(req.full_url, 302, "moved", hdrs,
+                                     io.BytesIO(b""))
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    atts = sources_crawl.parse_kocca_attachments(KOCCA_DETAIL_HTML)  # 기본 경로
+    assert not any("bbs/FileDown.do" in u for u in requested)  # 불허 경로 미요청
+    failed = [a for a in atts if a.get("download_status") == "failed"]
+    assert len(failed) == 1 and "noticeFilePop" in failed[0]["url"]
+
+
+def test_smtech_query_bearing_robots_rule_matches(sources_crawl, attach_download):
+    """[#3] 쿼리 포함 Disallow 규칙(…?RECH_ANCM_ID=S20131)이 매칭된다."""
+    R = sources_crawl.SMTECH_ROBOTS_DISALLOWED
+    base = ("https://www.smtech.go.kr/SBA/ETC/"
+            "RechSbjtAppl_forwardRechSbjtApplList.do")
+    assert not attach_download.robots_allowed(base + "?RECH_ANCM_ID=S20131", R)
+    assert not attach_download.robots_allowed(base + "?RECH_ANCM_ID=S20132", R)
+    # 같은 path라도 다른 쿼리는 규칙 밖 (robots는 리터럴 접두)
+    assert attach_download.robots_allowed(base + "?RECH_ANCM_ID=S99999", R)
+    # 인코딩 위장: %3F(=?)로 쿼리를 path에 숨겨도 디코딩 후보에서 걸린다
+    assert not attach_download.robots_allowed(
+        base + "%3FRECH_ANCM_ID=S20131", R)
+    # 기존 접두 패턴(쿼리 없는 규칙) 무회귀
+    assert not attach_download.robots_allowed(
+        "https://www.smtech.go.kr/nmbi/x?any=1", R)
+    assert attach_download.robots_allowed(
+        "https://www.smtech.go.kr/front/comn/AtchFileDownload.do?atchFileId=A", R)
+
+
+def test_kocca_popup_500_demotes_to_v2_incomplete_exit2(
+        sources_crawl, attach_download, monkeypatch, tmp_path):
+    """[#4] popup1 조회 실패(HTTP 500)가 소거되지 않는다 — attachments=[] /
+    complete:true / v3 / exit 0(fail-open)이 아니라 본문 v2 +
+    attachments_complete:false + exit 2로 강등."""
+    import io
+    import urllib.error
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom",
+                                     email.message.Message(), io.BytesIO(b""))
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    html = KOCCA_DETAIL_HTML.replace(
+        "<a href=\"javascript:openNoticeFileList2('76JNATPO10LM1AV000')\">"
+        "PMS 첨부</a>", "")  # 팝업1만 있는 공고
+    jsonl = write_rec(tmp_path, "kocca.jsonl",
+                      {"source": "kocca", "id": "326D00011111", "title": "합성"})
+    with pytest.raises(SystemExit) as e:
+        sources_crawl.cmd_detail(
+            lambda url, data=None: (200, html), [KOCCA_URL],
+            str(tmp_path / "details"),
+            download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    assert e.value.code == 2
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False
+    assert rec["hash_version"] == 2  # v3 아님
+    (att,) = rec["attachments"]
+    assert att["download_status"] == "failed"
+    assert "popup fetch failed" in att["download_reason"]

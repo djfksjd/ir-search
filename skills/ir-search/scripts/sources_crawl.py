@@ -556,6 +556,16 @@ SMTECH_ROBOTS_DISALLOWED = (
     "/csg/id/insusDclr_safDclr.do",
 )
 
+# 첨부 다운로드 허용 호스트 — **정확한 호스트만**('=' 접두, 실측값). 페이지
+# 크롤링(SOURCE_DOMAINS)과 달리 서브도메인 와일드카드를 배제한다: kocca.kr로
+# 두면 계약 미확정 pms.kocca.kr로의 리다이렉트가 host 검사를 통과해 버린다.
+ATTACH_HOSTS = {
+    "bizinfo": ("=www.bizinfo.go.kr", "=bizinfo.go.kr"),
+    "nipa": ("=www.nipa.kr", "=nipa.kr"),
+    "kocca": ("=www.kocca.kr",),  # pms.kocca.kr 등 서브도메인 배제(계약 미확정)
+    "smtech": ("=www.smtech.go.kr", "=smtech.go.kr"),
+}
+
 # 첨부 슬라이스 소스별 설정: robots 불허 접두, 공고 id 추출, 본문 마커.
 ATTACH_ROBOTS = {
     "bizinfo": BIZINFO_ROBOTS_DISALLOWED,
@@ -619,31 +629,53 @@ def parse_smtech_attachments(h):
     return out
 
 
-def parse_kocca_attachments(h, fetch):
+def fetch_kocca_popup(purl):
+    """KOCCA 파일 팝업 조회 — attach_download.open_validated 경유:
+    각 리다이렉트 홉이 **정확한 호스트(ATTACH_HOSTS) + robots 불허 접두** 검사를
+    요청 전에 통과해야 한다. 팝업이 /kocca/bbs/FileDown.do(robots 불허)나
+    pms.kocca.kr로 302해도 요청이 나가지 않는다."""
+    with attach_download.open_validated(
+            purl, ATTACH_HOSTS["kocca"], timeout=30,
+            robots_disallowed=KOCCA_ROBOTS_DISALLOWED) as r:
+        status = getattr(r, "status", None) or 200
+        return status, r.read().decode("utf-8", "replace")
+
+
+def parse_kocca_attachments(h, popup_fetch=None):
     """KOCCA 상세의 첨부 — 실측 2026-07-24. 상세 페이지에는 파일이 직접 없고
     팝업 2종을 경유한다:
 
     1. openNoticeFileList1('<intcNo>') → /kocca/noticeFilePop.do?intcNo=…
-       (robots 허용) — 팝업을 추가로 fetch해 fn_fileDownload('<intc>','<seq>')
-       행을 파싱한다. 다운로드 URL: /kocca/noticeFileDown.do?intcNo=…&seqNo=…
+       (robots 허용) — 팝업을 추가로 fetch(fetch_kocca_popup: 홉별 정확한
+       호스트+robots 검증)해 fn_fileDownload('<intc>','<seq>') 행을 파싱한다.
+       다운로드 URL: /kocca/noticeFileDown.do?intcNo=…&seqNo=…
        ("/*/FileDown.do" robots 패턴과 리터럴 불일치 — 허용)
+       **팝업 조회 실패는 fail-closed**: 첨부 유무를 알 수 없으므로 해당
+       팝업을 download_status "failed" 마커로 기록한다 → complete가 false로
+       남아 본문 v2 + attachments_complete:false + exit 2로 강등된다.
     2. openNoticeFileList2('<pblancId>') → pms.kocca.kr(별도 PMS 시스템, JS
        팝업) — 다운로드 계약 미확정: 링크만 기록(download_status
        "skipped_unverified") → attachments_complete는 false로 남는다(fail-closed).
     """
+    if popup_fetch is None:
+        popup_fetch = fetch_kocca_popup
     out, seen = [], set()
     for intc in dict.fromkeys(re.findall(r"openNoticeFileList1\('([^']+)'\)", h)):
         purl = ("https://www.kocca.kr/kocca/noticeFilePop.do?intcNo="
                 + urllib_quote(intc))
         try:
-            status, ph = fetch(purl)
-        except Exception as e:  # noqa: BLE001 — 팝업 실패는 해당 첨부 미확인
-            print(f"[ir-search] kocca 파일팝업 실패 {purl[:70]}: {e}",
-                  file=sys.stderr)
-            continue
-        if status != 200:
-            print(f"[ir-search] kocca 파일팝업 HTTP {status}: {purl[:70]}",
-                  file=sys.stderr)
+            status, ph = popup_fetch(purl)
+            if status != 200:
+                raise RuntimeError(f"HTTP {status}")
+        except attach_download.ManualEscalation:
+            raise
+        except Exception as e:  # noqa: BLE001 — fail-closed: 첨부 유무 불명
+            out.append({"url": purl, "filename": None,
+                        "download_status": "failed",
+                        "download_reason": f"popup fetch failed: {e}"})
+            print(f"WARNING [ir-search] kocca 파일팝업 실패 — 첨부 미확인, "
+                  f"partial로 강등: {purl[:70]}: {e}", file=sys.stderr)
+            time.sleep(DELAY)
             continue
         for m in re.finditer(
                 r"<a[^>]*fn_fileDownload\('([^']+)'\s*,\s*'?(\d+)'?\)"
@@ -675,7 +707,7 @@ def urllib_quote(s):
     return urllib.parse.quote(str(s), safe="")
 
 
-def collect_attachments(source, h, fetch):
+def collect_attachments(source, h):
     if source == "bizinfo":
         return parse_bizinfo_attachments(h)
     if source == "nipa":
@@ -683,7 +715,9 @@ def collect_attachments(source, h, fetch):
     if source == "smtech":
         return parse_smtech_attachments(h)
     if source == "kocca":
-        return parse_kocca_attachments(h, fetch)
+        # 팝업 조회는 fetch_kocca_popup(open_validated: 홉별 정확한 호스트
+        # + robots 검사) 경유 — 페이지 fetch를 재사용하지 않는다.
+        return parse_kocca_attachments(h)
     return []
 
 
@@ -766,7 +800,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             if source is not None and (download_dir or merge_into):
                 m = re.search(ATTACH_ID_PATTERNS[source], url)
                 rec_id = m.group(1) if m else None
-                attachments = collect_attachments(source, h, fetch)
+                attachments = collect_attachments(source, h)
                 start_markers, end_markers = BODY_MARKERS[source]
                 text = extract_body(h, start_markers, end_markers)
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -777,7 +811,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                     try:
                         attach_hashes = attach_download.process_attachments(
                             attachments, download_dir, DELAY,
-                            SOURCE_DOMAINS[source], ATTACH_ROBOTS[source],
+                            ATTACH_HOSTS[source], ATTACH_ROBOTS[source],
                             subdir=rec_id or digest8)  # 공고별 폴더 — 동명 충돌 방지
                     except attach_download.ManualEscalation as e:
                         # 401/403 — 우회하지 않는다. 단, 여기서 끊고 나가면
