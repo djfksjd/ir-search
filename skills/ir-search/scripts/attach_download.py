@@ -128,6 +128,18 @@ def safe_filename(name, idx):
 _MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
 
 
+def _robots_path_match(path, pattern):
+    """robots 패턴 1건 매칭 — 접두 매칭 + 구글 확장 문법('*' 와일드카드,
+    '$' 끝 앵커) 지원. KOCCA의 'Disallow:/*/FileDown.do' 같은 패턴용."""
+    if "*" not in pattern and not pattern.endswith("$"):
+        return path.startswith(pattern)
+    anchored = pattern.endswith("$")
+    if anchored:
+        pattern = pattern[:-1]
+    regex = "".join(".*" if ch == "*" else re.escape(ch) for ch in pattern)
+    return re.match(regex + ("$" if anchored else ""), path) is not None
+
+
 def robots_allowed(url, disallowed_prefixes):
     """robots.txt 불허 접두 경로 검사 — 매칭되면 다운로드 금지(링크만 수집).
 
@@ -159,7 +171,8 @@ def robots_allowed(url, disallowed_prefixes):
         # 단일화한 후보도 추가한다
         n = os.path.normpath(c)
         candidates.extend([n, re.sub(r"^/+", "/", c), re.sub(r"^/+", "/", n)])
-    return not any(c.startswith(p) for c in candidates for p in disallowed_prefixes)
+    return not any(_robots_path_match(c, p)
+                   for c in candidates for p in disallowed_prefixes)
 
 
 def recover_filename(cd_name):
@@ -262,6 +275,10 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
     d = real_d
     attach_hashes = []
     for idx, f in enumerate(attachments):
+        if f.get("download_status"):
+            # 사전 마킹된 항목(예: 계약 미확정 외부 시스템 링크
+            # "skipped_unverified") — 다운로드하지 않고 상태를 보존한다.
+            continue
         if not robots_allowed(f["url"], robots_disallowed_prefixes):
             f["download_status"] = "skipped_robots"
             print(f"[{tag}] robots 불허 경로 — 다운로드 생략(링크만): "

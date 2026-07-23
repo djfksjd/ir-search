@@ -19,15 +19,21 @@ Usage:
   python3 sources_crawl.py detail <bizinfo-url> -o details/ \
       --download-dir attachments/ [--merge-into bizinfo.jsonl]
 
-Attachment contract (bizinfo detail only for now; sole-search port):
+Attachment contract (bizinfo/NIPA/KOCCA/SMTECH detail; sole-search port):
   --download-dir downloads every attachment with pre-validated redirects
-  (https + bizinfo.go.kr allowlist checked BEFORE each hop, max 5),
-  a 50MB streaming cap and sha256 per file. robots.txt-disallowed paths
-  (/uploads/ → /upload prefix) are recorded as links only (skipped_robots).
+  (https + per-source allowlist AND robots prefixes checked BEFORE each hop,
+  max 5), a 50MB streaming cap, sha256 per file, and a per-announcement
+  subdirectory. robots.txt-disallowed paths are recorded as links only
+  (skipped_robots). Per-source contracts (verified live 2026-07-24, see
+  references/sources.md):
+    bizinfo  /cmm/fms/… downloadable; /uploads/… robots-disallowed
+    nipa     /comm/getFile?… downloadable (no User-agent:* robots block)
+    kocca    popup1 /kocca/noticeFilePop.do → /kocca/noticeFileDown.do
+             downloadable; popup2 pms.kocca.kr link-only (skipped_unverified)
+    smtech   /front/comn/AtchFileDownload.do?atchFileId=… downloadable
   content_hash is stamped hash v3 (body + sorted attachment sha256s) ONLY
   when every download succeeded; otherwise the body-only v2 hash is kept and
   the record gets attachments_complete:false + exit 2 (partial).
-  NIPA/KOCCA/SMTECH attachments are deferred until fixtures exist (#13).
 
 Unified JSONL schema:
   {"source", "id", "title", "field", "org", "apply_start", "apply_end",
@@ -476,6 +482,218 @@ def parse_bizinfo_attachments(h):
              "filename": a.rsplit("/", 1)[-1].split("?")[0]} for a in seen]
 
 
+# ---- NIPA·KOCCA·SMTECH 첨부 계약 (2026-07-24 실호출로 확인 — references/sources.md)
+
+# NIPA robots.txt(2026-07-24): `User-agent: *` 블록이 없다(Googlebot 전용
+# 규칙 /sea·/tota + Allow:/ 뿐) — 우리 크롤러에 적용되는 불허 경로 없음.
+NIPA_ROBOTS_DISALLOWED = ()
+
+# KOCCA robots.txt(2026-07-24) User-agent:* 블록 전사. 첨부 다운로드 엔드포인트
+# /kocca/noticeFileDown.do는 "/*/FileDown.do" 패턴(리터럴 "/FileDown.do" 세그먼트
+# 필요)과 불일치 — 허용. 와일드카드 패턴은 attach_download._robots_path_match가 처리.
+KOCCA_ROBOTS_DISALLOWED = (
+    "/kocca/member/", "/kocca/online", "/*/FileDown.do", "/kocca/counsel/",
+    "/kocca/bbs/view/userInstRegPage.do", "/kocca/bbs/view/regContent.do",
+    "/story/requestResult/", "/story/request/", "/curoms/", "/gamehubpms/",
+    "/ourcharacter/", "/bestgame/", "/seriousgame/", "/gameguide/",
+    "/broadcastdb.", "/cop/", "/portal/", "/kocca/searchList.do",
+    "/kocca/*/list.do", "/kocca/bbs/list/*.do",
+)
+
+# SMTECH robots.txt(2026-07-24) User-agent:* 블록 전사(절대 URL 1건은 경로로 변환).
+# 첨부 다운로드 엔드포인트 /front/comn/AtchFileDownload.do는 목록에 없음 — 허용.
+SMTECH_ROBOTS_DISALLOWED = (
+    "/SBA/SA/SbjtAppl_selectSbjtApplList.do",
+    "/SBA/SA/HealthMngSbjtRcpt_selectSbjtApplPrg.do",
+    "/SBA/ETC/EtcSbjtAppl_forwardEtcSbjtApplList.do",
+    "/SBA/ETC/RechSbjtAppl_forwardRechSbjtApplList.do?RECH_ANCM_ID=S20131",
+    "/SBA/ETC/RechSbjtAppl_forwardRechSbjtApplList.do?RECH_ANCM_ID=S20132",
+    "/SBA/SA/SbjtAppl_selectSbjtPtcpList.do?gMenu=SBA",
+    "/SBA/SA/SA_SbjtMbrSprtAncmList.do", "/SBA/SA/SA_SbjtNseeTdpList.do",
+    "/sba/ee/ElecEvalSbjtLst.do", "/sba/se/OnlineEval.do",
+    "/sba/se/SvorgnSelfEval.do",
+    "/SBA/RE/PosnRechEqpm_getPosnRechEqpmMain.do",
+    "/SBA/RE/RechEqpmRead_getRechEqpmRead.do",
+    "/SBA/RE/BexpPayReq_viewBexpPayReq.do",
+    "/SBA/RE/RechEqpmUseSituSv_viewRechEqpmUseSitu.do",
+    "/SBA/RE/RechEqpmRevSv_viewRechEqpmRev.do",
+    "/SBA/RE/PtcpReqListSv_viewPtcpReqList.do",
+    "/SBA/RE/RechEqpmMentor_viewMentorList.do",
+    "/SBA/RE/RechEqpmMentorAns_viewMentoringList.do",
+    "/SBA/RE/VchrReqSitu_viewVchrReqSitu.do",
+    "/SBA/RE/RechEqpmRev_viewRechEqpmRev.do",
+    "/SBA/RE/RechEqpmUseSitu_viewRechEqpmUseSitu.do",
+    "/SBA/RE/OftnUseEqpm_viewOftnUseEqpm.do",
+    "/SBA/RE/PtcpReqList_viewPtcpReqList.do",
+    "/SBA/RE/PtcpObjtSbjt_selectPtcpObjtSbjt.do",
+    "/SBA/RE/RechEqpmMentoring_viewMentoringList.do",
+    "/SBA/EA/AgreAppl_selectAgreWrtSbjt.do",
+    "/SBA/EA/StepAgreAppl_selectAgreWrtSbjt.do",
+    "/SBA/EA/AgreChng_selectAgreChngObjtSbjt.do",
+    "/SBA/EA/ChrgrChng_selectChrgrChngSbjtLst.do",
+    "/SBA/EA/MngAdmn_viewMngAdmn.do", "/SBA/EA/AgreRead_selectAgreRead.do",
+    "/SBA/RR/PrgrtRptpLst_getPrgrtRptLst.do",
+    "/SBA/RR/StepRptpLst_getStepRptLst.do",
+    "/SBA/RR/LastRptpLst_getLastRptLst.do",
+    "/SBA/RR/MngRsltRptp_viewMngRsltRptp.do",
+    "/SBA/RN/RechNoteList_viewRechNoteList.do",
+    "/SBA/FA/RechMtrsEstmAdmn.do", "/SBA/FA/KldgPrgtAdmn.do",
+    "/SBA/FA/SbjtThesAdmn.do", "/sba/sc/SmbaSancAct.do",
+    "/sba/sc/OgovdSancAct.do",
+    "/SBA/DR/DemResearch_forwardDemResearchApplMain.do",
+    "/SBA/DR/DemResearch_forwardDemResearchApplTeclMain.do",
+    "/main/bankLoginGW.do", "/main/bankFrame.do",
+    "/OSA/BR/BR_RtrtGuid.do", "/OSA/BR/BR_RtrtSituRead.do",
+    "/OSA/BR/BR_PntRtrt.do", "/OSA/BR/BR_CardRtrt.do",
+    "/OSA/BR/BR_CardCanRtrt.do", "/OSA/BR/BR_StaxRtrt.do",
+    "/OSA/BR/BR_TrstDvlpRtrt.do", "/OSA/PS/PS_PaymPlanRead.do",
+    "/OSA/PS/PaymPlanWriteRead.do", "/OSA/OS/OS_CommEvdn.do",
+    "/OSA/OS/OS_ExecBrdnRead.do", "/OSA/OS/OS_SetlRpt.do",
+    "/OSA/OS/OS_SetlRslt.do", "/csg/qn/qna_list.do",
+    "/csg/hi/confirmationInfo.do", "/csg/hi/confirmation.do",
+    "/gpin/gPinAuthRequest.do", "/front/nmbi/", "/nmbi/",
+    "/csg/cr/crn_list.do", "/csg/id/insusDclr.do",
+    "/csg/id/insusDclr_safDclr.do",
+)
+
+# 첨부 슬라이스 소스별 설정: robots 불허 접두, 공고 id 추출, 본문 마커.
+ATTACH_ROBOTS = {
+    "bizinfo": BIZINFO_ROBOTS_DISALLOWED,
+    "nipa": NIPA_ROBOTS_DISALLOWED,
+    "kocca": KOCCA_ROBOTS_DISALLOWED,
+    "smtech": SMTECH_ROBOTS_DISALLOWED,
+}
+ATTACH_ID_PATTERNS = {
+    "bizinfo": r"pblancId=(PBLN_\d+)",
+    "nipa": r"/home/2-2/(\d+)",
+    "kocca": r"intcNo=([A-Za-z0-9]+)",
+    "smtech": r"ancmId=([A-Za-z0-9]+)",
+}
+# 본문 시작/끝 마커 (컨테이너 실측 2026-07-24; bizinfo는 2026-07-23)
+BODY_MARKERS = {
+    "bizinfo": (BIZINFO_START_MARKERS, BIZINFO_END_MARKERS),
+    "nipa": ((r'<div[^>]+class="[^"]*tbWrap[^"]*gonggo[^"]*"',
+              r'<div[^>]+class="[^"]*hwp_editor_board_content[^"]*"'),
+             (r'<footer\b', r'<div[^>]+id="footer"')),
+    "kocca": ((r'<div[^>]+id="contents_body"',),
+              (r'<footer\b', r'<div[^>]+id="footer"')),
+    "smtech": ((r'<div[^>]+id="subcontent"',),
+               (r'<div[^>]+id="footer"', r'<footer\b')),
+}
+
+
+def parse_nipa_attachments(h):
+    """NIPA 상세의 첨부(/comm/getFile?...) — 실측 2026-07-24.
+
+    <a href="/comm/getFile?srvcId=...&fileNo=...">파일명.hwp (파일크기: 134 KB)</a>
+    앵커 텍스트에서 '(파일크기: …)' 꼬리를 제거해 파일명을 얻는다."""
+    out, seen = [], set()
+    for m in re.finditer(r'href="(/comm/getFile\?[^"]+)"[^>]*>([\s\S]*?)</a>', h):
+        url = "https://www.nipa.kr" + htmllib.unescape(m.group(1))
+        if url in seen:
+            continue
+        seen.add(url)
+        name = clean(re.sub(r"<[^>]+>", " ",
+                            re.sub(r"\(파일크기[\s\S]*$", "", m.group(2))))
+        out.append({"url": url, "filename": name or None})
+    return out
+
+
+def parse_smtech_attachments(h):
+    """SMTECH 상세의 첨부 — 실측 2026-07-24.
+
+    <a ... onclick="cfn_AtchFileDownload('<ID>','/front','fileDownFrame')">파일명</a>
+    (href="javascript:cfn_..." 변형 포함). 다운로드 URL은 common.js의
+    cfn_AtchFileDownloadUrl 계약: <context>/comn/AtchFileDownload.do?atchFileId=<ID>"""
+    out, seen = [], set()
+    for m in re.finditer(
+            r"<a[^>]*cfn_AtchFileDownload\('([0-9A-Fa-f]+)'\s*,\s*'([^']*)'"
+            r"[^>]*>([\s\S]*?)</a>", h):
+        fid, ctx = m.group(1), m.group(2) or "/front"
+        url = f"https://www.smtech.go.kr{ctx}/comn/AtchFileDownload.do?atchFileId={fid}"
+        if url in seen:
+            continue
+        seen.add(url)
+        name = clean(re.sub(r"<[^>]+>", " ", m.group(3)))
+        out.append({"url": url, "filename": name or None})
+    return out
+
+
+def parse_kocca_attachments(h, fetch):
+    """KOCCA 상세의 첨부 — 실측 2026-07-24. 상세 페이지에는 파일이 직접 없고
+    팝업 2종을 경유한다:
+
+    1. openNoticeFileList1('<intcNo>') → /kocca/noticeFilePop.do?intcNo=…
+       (robots 허용) — 팝업을 추가로 fetch해 fn_fileDownload('<intc>','<seq>')
+       행을 파싱한다. 다운로드 URL: /kocca/noticeFileDown.do?intcNo=…&seqNo=…
+       ("/*/FileDown.do" robots 패턴과 리터럴 불일치 — 허용)
+    2. openNoticeFileList2('<pblancId>') → pms.kocca.kr(별도 PMS 시스템, JS
+       팝업) — 다운로드 계약 미확정: 링크만 기록(download_status
+       "skipped_unverified") → attachments_complete는 false로 남는다(fail-closed).
+    """
+    out, seen = [], set()
+    for intc in dict.fromkeys(re.findall(r"openNoticeFileList1\('([^']+)'\)", h)):
+        purl = ("https://www.kocca.kr/kocca/noticeFilePop.do?intcNo="
+                + urllib_quote(intc))
+        try:
+            status, ph = fetch(purl)
+        except Exception as e:  # noqa: BLE001 — 팝업 실패는 해당 첨부 미확인
+            print(f"[ir-search] kocca 파일팝업 실패 {purl[:70]}: {e}",
+                  file=sys.stderr)
+            continue
+        if status != 200:
+            print(f"[ir-search] kocca 파일팝업 HTTP {status}: {purl[:70]}",
+                  file=sys.stderr)
+            continue
+        for m in re.finditer(
+                r"<a[^>]*fn_fileDownload\('([^']+)'\s*,\s*'?(\d+)'?\)"
+                r"[^>]*>([\s\S]*?)</a>", ph):
+            url = ("https://www.kocca.kr/kocca/noticeFileDown.do?intcNo="
+                   f"{urllib_quote(m.group(1))}&seqNo={m.group(2)}")
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append({"url": url,
+                        "filename": clean(re.sub(r"<[^>]+>", " ", m.group(3)))
+                        or None})
+        time.sleep(DELAY)
+    for pid in dict.fromkeys(re.findall(r"openNoticeFileList2\('([^']+)'\)", h)):
+        url = ("https://pms.kocca.kr/pblanc/pblancPopupViewPage.do?pblancId="
+               + urllib_quote(pid))
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"url": url, "filename": None,
+                    "download_status": "skipped_unverified",
+                    "download_reason": "pms.kocca.kr 팝업 — 다운로드 계약 미확정 "
+                                       "(링크만 기록)"})
+    return out
+
+
+def urllib_quote(s):
+    import urllib.parse
+    return urllib.parse.quote(str(s), safe="")
+
+
+def collect_attachments(source, h, fetch):
+    if source == "bizinfo":
+        return parse_bizinfo_attachments(h)
+    if source == "nipa":
+        return parse_nipa_attachments(h)
+    if source == "smtech":
+        return parse_smtech_attachments(h)
+    if source == "kocca":
+        return parse_kocca_attachments(h, fetch)
+    return []
+
+
+def source_of_url(url):
+    for name, domains in SOURCE_DOMAINS.items():
+        if host_allowed(url, domains):
+            return name
+    return None
+
+
 def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete,
                  hash_version):
     """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
@@ -505,14 +723,16 @@ def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete
 def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     """Save the text of announcement detail pages (any source) for eligibility checks.
 
-    With --download-dir (bizinfo detail URLs only for now): also collects the
-    attachment links, downloads them under the sole-search security contract
-    (pre-validated redirects, 50MB cap, sha256) and stamps hash v3
-    (body + sorted attachment sha256s) ONLY when every download succeeded.
-    Any failed/blocked/robots-skipped attachment keeps the body-only v2 hash
+    With --download-dir (bizinfo/NIPA/KOCCA/SMTECH detail URLs): also collects
+    the attachment links per the source contracts verified live on 2026-07-24
+    (see references/sources.md), downloads them under the sole-search security
+    contract (pre-validated redirects incl. robots on every hop, 50MB cap,
+    sha256, per-announcement subdir) and stamps hash v3 (body + sorted
+    attachment sha256s) ONLY when every download succeeded. Any failed/
+    blocked/robots-skipped/unverified attachment keeps the body-only v2 hash
     with attachments_complete=false and turns the run into partial (exit 2).
-    NIPA/KOCCA/SMTECH attachment support is deferred until per-source fixtures
-    exist (issue #13 agreement); their pages are saved text-only as before.
+    KOCCA popup-2 attachments (pms.kocca.kr) are link-only
+    ("skipped_unverified") until that contract is verified.
 
     Exits 2 if any URL fails; a per-URL success/failure summary goes to stderr.
     """
@@ -537,18 +757,18 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
             path = f"{outdir}/{name}_{digest8}.txt"
 
-            is_bizinfo = host_allowed(url, SOURCE_DOMAINS["bizinfo"])
-            if (download_dir or merge_into) and not is_bizinfo:
-                print("[ir-search] NOTE: 첨부 다운로드/병합은 현재 bizinfo 상세만 "
-                      "지원 (K-Startup은 kstartup_crawl.py detail --download-dir; "
-                      "NIPA/KOCCA/SMTECH는 fixture 확보 후) — 본문만 저장: "
-                      f"{url[:60]}", file=sys.stderr)
+            source = source_of_url(url)
+            if (download_dir or merge_into) and source is None:
+                print("[ir-search] NOTE: 이 소스는 첨부 다운로드/병합 미지원 "
+                      "(K-Startup은 kstartup_crawl.py detail --download-dir) — "
+                      f"본문만 저장: {url[:60]}", file=sys.stderr)
 
-            if is_bizinfo and (download_dir or merge_into):
-                m = re.search(r"pblancId=(PBLN_\d+)", url)
+            if source is not None and (download_dir or merge_into):
+                m = re.search(ATTACH_ID_PATTERNS[source], url)
                 rec_id = m.group(1) if m else None
-                attachments = parse_bizinfo_attachments(h)
-                text = extract_body(h)
+                attachments = collect_attachments(source, h, fetch)
+                start_markers, end_markers = BODY_MARKERS[source]
+                text = extract_body(h, start_markers, end_markers)
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
                 hash_version = attach_download.HASH_VERSION_BODY
                 complete = not attachments  # 링크만 수집: 첨부가 있으면 미검증
@@ -557,7 +777,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                     try:
                         attach_hashes = attach_download.process_attachments(
                             attachments, download_dir, DELAY,
-                            SOURCE_DOMAINS["bizinfo"], BIZINFO_ROBOTS_DISALLOWED,
+                            SOURCE_DOMAINS[source], ATTACH_ROBOTS[source],
                             subdir=rec_id or digest8)  # 공고별 폴더 — 동명 충돌 방지
                     except attach_download.ManualEscalation as e:
                         # 401/403 — 우회하지 않는다. 단, 여기서 끊고 나가면
@@ -588,7 +808,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                             + _json.dumps(attachments, ensure_ascii=False) + "\n\n")
                     f.write(text)
                 if merge_into:
-                    if rec_id and not merge_detail(merge_into, "bizinfo", rec_id,
+                    if rec_id and not merge_detail(merge_into, source, rec_id,
                                                    content_hash, attachments,
                                                    complete, hash_version):
                         results.append((url, f"FAIL merge: {rec_id} not in "
@@ -660,12 +880,13 @@ def main():
     p_det.add_argument("-o", "--output", default="details")
     p_det.add_argument(
         "--download-dir",
-        help="bizinfo 첨부를 이 폴더에 다운로드 — 전부 성공 시에만 hash v3 스탬프, "
-        "불완전이면 본문 v2 유지 + attachments_complete:false + exit 2",
+        help="bizinfo/NIPA/KOCCA/SMTECH 첨부를 이 폴더에(공고별 하위 폴더) "
+        "다운로드 — 전부 성공 시에만 hash v3 스탬프, 불완전이면 본문 v2 유지 "
+        "+ attachments_complete:false + exit 2",
     )
     p_det.add_argument(
         "--merge-into",
-        help="bizinfo 목록 jsonl에 content_hash/hash_version/attachments를 병합",
+        help="목록 jsonl에 content_hash/hash_version/attachments를 병합",
     )
 
     args = ap.parse_args()
