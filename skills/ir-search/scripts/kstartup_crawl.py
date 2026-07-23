@@ -223,10 +223,12 @@ def cmd_list(args):
             file=sys.stderr,
         )
         fail = True
-    if len(seen) < MIN_EXPECTED:
+    min_expected = args.min_expected
+    if min_expected > 0 and len(seen) < min_expected:
         print(
-            f"WARNING: only {len(seen)} items collected (< {MIN_EXPECTED} minimum "
-            "expected — K-Startup normally lists 250+ open announcements)",
+            f"WARNING: only {len(seen)} items collected (< {min_expected} minimum "
+            "expected — K-Startup normally lists 250+ open announcements; "
+            "genuinely low season? re-run with --min-expected 0 to accept)",
             file=sys.stderr,
         )
         fail = True
@@ -284,6 +286,8 @@ def main():
     p_list = sub.add_parser("list", help="collect all currently-recruiting announcements")
     p_list.add_argument("-o", "--output", default="kstartup_all.jsonl")
     p_list.add_argument("--max-pages", type=int, default=40)
+    p_list.add_argument("--min-expected", type=int, default=MIN_EXPECTED,
+                        help="fail (exit 2) below this many items; 0 disables the check")
     p_list.set_defaults(func=cmd_list)
 
     p_det = sub.add_parser("detail", help="save detail-page text")

@@ -293,6 +293,11 @@ def crawl(source, fetch, max_pages):
         time.sleep(DELAY)
     if stop_reason is None:
         stop_reason = "page-cap"
+        if no_new_streak == 0:
+            # cap reached while the last page still had new items — more content
+            # likely remains. Per the SKILL contract, page-cap == partial (exit 2);
+            # intentional recent-mode runs must record this in coverage.
+            error = f"page cap reached at p{max_pages} — collection may be INCOMPLETE"
     print(f"[ir-search] {source}: stop reason: {stop_reason}"
           + (f" ({error})" if error else ""), file=sys.stderr)
     return list(seen.values()), error
@@ -308,9 +313,17 @@ def strip_html(text):
 ALLOWED_DOMAINS = ("bizinfo.go.kr", "nipa.kr", "kocca.kr", "smtech.go.kr", "k-startup.go.kr")
 
 
-def host_allowed(host):
-    """Exact-match domain check: host == d or host ends with '.' + d."""
-    host = host.lower().rstrip(".").split(":", 1)[0]
+def host_allowed(url):
+    """Exact-match domain check on the URL's real hostname.
+
+    Uses urlsplit().hostname so userinfo/port tricks ("bizinfo.go.kr:443@evil.example")
+    cannot spoof the allowlist — naive string slicing was bypassable.
+    """
+    import urllib.parse
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
     return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
 
 
@@ -325,8 +338,7 @@ def cmd_detail(fetch, urls, outdir):
     os.makedirs(outdir, exist_ok=True)
     results = []  # (url, "OK path" | "FAIL reason")
     for url in urls:
-        host = re.sub(r"^https?://([^/]+).*", r"\1", url)
-        if not host_allowed(host):
+        if not host_allowed(url):
             results.append((url, "FAIL non-source host"))
             print(f"[ir-search] skip non-source url: {url[:60]}", file=sys.stderr)
             continue

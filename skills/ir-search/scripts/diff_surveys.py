@@ -156,10 +156,14 @@ def main():
     elif args.old_profile and args.new_profile:
         old_fields = parse_profile_bullets(args.old_profile)
         new_fields = parse_profile_bullets(args.new_profile)
-        if not old_fields or not new_fields:
+        # 판정 축(PROFILE_AXES)이 하나도 없는 프로필은 파싱 실패와 같다 — 무관한
+        # 불릿만 있는 파일 두 개가 "동일 fingerprint"로 승계를 통과하면 안 된다.
+        old_axes = any(old_fields.get(k) for k in PROFILE_AXES)
+        new_axes = any(new_fields.get(k) for k in PROFILE_AXES)
+        if not old_fields or not new_fields or not old_axes or not new_axes:
             invalidate = True
-            print("WARNING: 프로필 파일을 읽지 못했다 — 승계 무효(fail-closed), "
-                  "전체 재검토", file=sys.stderr)
+            print("WARNING: 프로필 파일을 읽지 못했거나 판정 축(창업 단계·지역 등)이 "
+                  "비어 있다 — 승계 무효(fail-closed), 전체 재검토", file=sys.stderr)
         elif profile_fingerprint(old_fields) != profile_fingerprint(new_fields):
             invalidate = True
             print("WARNING: profile changed — 전체 재판정 필요 "
