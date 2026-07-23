@@ -125,13 +125,37 @@ def safe_filename(name, idx):
     return f"{idx:02d}_{base[:120]}" if base else f"{idx:02d}_attach"
 
 
+_MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
+
+
 def robots_allowed(url, disallowed_prefixes):
-    """robots.txt 불허 접두 경로 검사 — 매칭되면 다운로드 금지(링크만 수집)."""
+    """robots.txt 불허 접두 경로 검사 — 매칭되면 다운로드 금지(링크만 수집).
+
+    fail-closed: percent-인코딩 위장(/%75ploads/, 이중 인코딩 /%2575ploads/)을
+    반복 unquote(최대 5회, 고정점 도달 시 중단)로 정규화하고, **원본과 모든
+    디코딩 단계 + normpath 정규화 형태 중 하나라도** 불허 접두에 걸리면
+    거부한다. 디코딩 불가/파싱 불가도 거부."""
     try:
         path = urllib.parse.urlsplit(url).path
     except ValueError:
         return False
-    return not any(path.startswith(p) for p in disallowed_prefixes)
+    candidates = []
+    cur = path
+    for _ in range(_MAX_UNQUOTE + 1):
+        candidates.append(cur)
+        try:
+            nxt = urllib.parse.unquote(cur)
+        except (ValueError, UnicodeDecodeError):
+            return False  # 디코딩 불가 — fail-closed
+        if nxt == cur:
+            break
+        cur = nxt
+    else:
+        return False  # 상한 내 고정점 미도달(과도한 다중 인코딩) — fail-closed
+    for c in list(candidates):
+        # /a/../uploads 류 경로 정규화 형태도 함께 검사
+        candidates.append(os.path.normpath(c))
+    return not any(c.startswith(p) for c in candidates for p in disallowed_prefixes)
 
 
 def recover_filename(cd_name):
@@ -215,10 +239,23 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
     sha256, local_path를 기록한다. 텍스트 추출은 이 라운드 범위 밖 —
     hash v3 판단은 download_status "ok" 전건 여부만 본다.
     ManualEscalation(401/403)은 그대로 올린다(호출부가 수동 전환 처리)."""
-    d = pathlib.Path(download_dir).resolve()
+    base = pathlib.Path(download_dir).resolve()
+    d = base
     if subdir is not None:
-        d = d / safe_subdir(subdir)
+        d = base / safe_subdir(subdir)
+        # 사전 배치된 symlink 하위 폴더로 base 밖에 기록되는 탈출 차단:
+        # (a) 폴더 자체가 symlink면 거부, (b) 생성 후 realpath가 base 내부인지
+        # 재검증 — 파일 최종 경로 검사(download_attachment)도 이 realpath 기준
+        # dirpath로 수행된다.
+        if d.is_symlink():
+            raise RuntimeError(f"subdir_symlink_blocked: {d.name}")
     d.mkdir(parents=True, exist_ok=True)
+    real_d = pathlib.Path(os.path.realpath(d))
+    real_base = pathlib.Path(os.path.realpath(base))
+    if real_d != real_base and \
+            os.path.commonpath([str(real_d), str(real_base)]) != str(real_base):
+        raise RuntimeError(f"subdir_escape_blocked: {d}")
+    d = real_d
     attach_hashes = []
     for idx, f in enumerate(attachments):
         if not robots_allowed(f["url"], robots_disallowed_prefixes):

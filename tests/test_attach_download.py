@@ -309,3 +309,104 @@ def test_same_filename_across_announcements_no_overwrite(attach_download,
 def test_safe_subdir_sanitizes_separators(attach_download):
     assert "/" not in attach_download.safe_subdir("../../etc")
     assert attach_download.safe_subdir("PBLN_000000000001") == "PBLN_000000000001"
+
+
+# ---- percent-인코딩 robots 우회 차단 (Codex 재심사 #1 회귀) --------------------
+
+def test_robots_percent_encoded_path_blocked(attach_download):
+    """/%75ploads == /uploads — 인코딩 위장이 robots 검사를 통과하면 안 된다."""
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/%75ploads/a.hwp", BIZ_ROBOTS)
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/%2575ploads/a.hwp", BIZ_ROBOTS)  # 이중 인코딩
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/x/../uploads/a.hwp", BIZ_ROBOTS)  # normpath
+    # 정상 경로는 여전히 허용
+    assert attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/cmm/fms/getFile.do", BIZ_ROBOTS)
+
+
+def test_redirect_to_percent_encoded_robots_path_blocked(attach_download,
+                                                         monkeypatch):
+    """/cmm/fms/ → 302 → /%75ploads/… — 디코딩하면 robots 불허. 요청 금지."""
+    requested = []
+
+    def fake_urlopen(req, timeout):
+        requested.append(req.full_url)
+        if "ploads" in req.full_url:
+            raise AssertionError("인코딩 위장 robots 불허 경로가 요청됐다")
+        raise http_error(req.full_url, 302,
+                         "https://www.bizinfo.go.kr/%75ploads/encoded.hwp")
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    with pytest.raises(attach_download.RedirectBlocked, match="robots 불허"):
+        attach_download.open_validated(
+            "https://www.bizinfo.go.kr/cmm/fms/start", HOSTS, 30,
+            robots_disallowed=BIZ_ROBOTS)
+    assert requested == ["https://www.bizinfo.go.kr/cmm/fms/start"]
+
+
+def test_robots_excessive_multi_encoding_fail_closed(attach_download):
+    """디코딩 상한(5회) 내 고정점 미도달 — fail-closed로 거부."""
+    deep = "uploads"
+    for _ in range(7):
+        import urllib.parse as up
+        deep = up.quote(deep, safe="")
+    assert not attach_download.robots_allowed(
+        f"https://www.bizinfo.go.kr/{deep}/a.hwp", BIZ_ROBOTS)
+
+
+# ---- symlink 하위 폴더 탈출 차단 (Codex 재심사 #2 회귀) ------------------------
+
+def test_symlinked_subdir_blocked(attach_download, monkeypatch, tmp_path):
+    """사전 배치된 <download-dir>/<공고ID> symlink로 base 밖에 기록 금지."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "atts"
+    base.mkdir()
+    (base / "PBLN_X").symlink_to(outside)
+
+    def boom(req, timeout):
+        raise AssertionError("symlink 탈출 상태에서 다운로드가 시도됐다")
+
+    monkeypatch.setattr(attach_download, "_urlopen", boom)
+    atts = [{"url": "https://www.bizinfo.go.kr/cmm/fms/f", "filename": "f.pdf"}]
+    with pytest.raises(RuntimeError, match="subdir_symlink_blocked"):
+        attach_download.process_attachments(atts, base, 0, HOSTS, BIZ_ROBOTS,
+                                            subdir="PBLN_X")
+    assert list(outside.iterdir()) == []  # base 밖에 아무것도 안 쓰였다
+
+
+def test_symlinked_base_parent_escape_blocked(attach_download, monkeypatch,
+                                              tmp_path):
+    """realpath 재검증 — 정제된 subdir 이름이 그 자체로는 안전해도, 최종
+    realpath가 base 밖이면 거부한다 (환경 조작 방어)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "atts"
+    base.mkdir()
+    (base / "PBLN_Y").symlink_to(outside)
+    # is_symlink 검사를 우회하는 가상 시나리오를 realpath 검증이 잡는지 확인
+    monkeypatch.setattr(attach_download.pathlib.Path, "is_symlink",
+                        lambda self: False)
+    atts = [{"url": "https://www.bizinfo.go.kr/cmm/fms/f", "filename": "f.pdf"}]
+    monkeypatch.setattr(attach_download, "_urlopen",
+                        lambda req, timeout: (_ for _ in ()).throw(
+                            AssertionError("다운로드 시도 금지")))
+    with pytest.raises(RuntimeError, match="subdir_escape_blocked"):
+        attach_download.process_attachments(atts, base, 0, HOSTS, BIZ_ROBOTS,
+                                            subdir="PBLN_Y")
+    assert list(outside.iterdir()) == []
+
+
+def test_normal_subdir_still_works_after_hardening(attach_download, monkeypatch,
+                                                   tmp_path):
+    monkeypatch.setattr(attach_download, "_urlopen",
+                        lambda req, timeout: FakeResp(b"OK", url=req.full_url))
+    atts = [{"url": "https://www.bizinfo.go.kr/cmm/fms/f", "filename": "f.pdf"}]
+    hashes = attach_download.process_attachments(atts, tmp_path, 0, HOSTS,
+                                                 BIZ_ROBOTS, subdir="PBLN_OK")
+    assert len(hashes) == 1
+    assert atts[0]["download_status"] == "ok"
+    import pathlib
+    assert pathlib.Path(atts[0]["local_path"]).parent.name == "PBLN_OK"
