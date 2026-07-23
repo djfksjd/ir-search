@@ -403,3 +403,153 @@ def test_kocca_popup_500_demotes_to_v2_incomplete_exit2(
     (att,) = rec["attachments"]
     assert att["download_status"] == "failed"
     assert "popup fetch failed" in att["download_reason"]
+
+
+# ---- Codex 재심사(PR #15) 잔여 3건 회귀 ---------------------------------------
+
+def transport(script):
+    requested = []
+
+    def do_request(url, data=None):
+        requested.append(url)
+        return script[url]
+
+    return do_request, requested
+
+
+def test_detail_fetch_redirect_to_pms_blocked(sources_crawl):
+    """[#1] 정상 KOCCA 상세가 pms.kocca.kr로 302 — 정확한 호스트 정책으로
+    요청 전 차단, pms에는 요청이 나가지 않는다."""
+    do_request, requested = transport({
+        "https://www.kocca.kr/kocca/pims/view.do?intcNo=X":
+            (302, "", "https://pms.kocca.kr/pblanc/view.do"),
+    })
+    with pytest.raises(RuntimeError, match="redirect to non-source url blocked"):
+        sources_crawl.follow_redirects(
+            do_request, "https://www.kocca.kr/kocca/pims/view.do?intcNo=X",
+            allowed_domains=sources_crawl.ATTACH_HOSTS["kocca"],
+            robots_disallowed=sources_crawl.KOCCA_ROBOTS_DISALLOWED)
+    assert not any("pms.kocca.kr" in u for u in requested)
+
+
+def test_detail_fetch_redirect_to_robots_path_blocked(sources_crawl):
+    """[#1] 상세가 /kocca/bbs/FileDown.do(robots 불허)로 302 — 홉 robots
+    검사로 요청 전 차단."""
+    do_request, requested = transport({
+        "https://www.kocca.kr/kocca/pims/view.do?intcNo=X":
+            (302, "", "https://www.kocca.kr/kocca/bbs/FileDown.do?f=1"),
+    })
+    with pytest.raises(RuntimeError, match="robots-disallowed url blocked"):
+        sources_crawl.follow_redirects(
+            do_request, "https://www.kocca.kr/kocca/pims/view.do?intcNo=X",
+            allowed_domains=sources_crawl.ATTACH_HOSTS["kocca"],
+            robots_disallowed=sources_crawl.KOCCA_ROBOTS_DISALLOWED)
+    assert requested == ["https://www.kocca.kr/kocca/pims/view.do?intcNo=X"]
+
+
+def test_sources_host_allowed_exact_prefix(sources_crawl):
+    """[#1] sources_crawl.host_allowed도 '=' 정확 일치를 지원한다
+    (follow_redirects가 쓰는 매처)."""
+    assert sources_crawl.host_allowed("https://www.kocca.kr/x", ("=www.kocca.kr",))
+    assert not sources_crawl.host_allowed("https://pms.kocca.kr/x",
+                                          ("=www.kocca.kr",))
+    # 기존 와일드카드 항목 무회귀
+    assert sources_crawl.host_allowed("https://www.bizinfo.go.kr/x",
+                                      ("bizinfo.go.kr",))
+
+
+def test_follow_redirects_without_robots_unchanged(sources_crawl):
+    """[#1] robots 인자 미지정(목록 크롤 경로)은 기존 동작 그대로."""
+    do_request, requested = transport({
+        "https://www.bizinfo.go.kr/a": (302, "", "/b"),
+        "https://www.bizinfo.go.kr/b": (200, "ok", None),
+    })
+    assert sources_crawl.follow_redirects(
+        do_request, "https://www.bizinfo.go.kr/a",
+        allowed_domains=sources_crawl.SOURCE_DOMAINS["bizinfo"]) == (200, "ok")
+
+
+KOCCA_EMPTY_POPUP_HTML = """
+<html><head><title>공고관련 파일리스트</title></head><body>
+<h4>공고관련자료</h4><div class="board_write01"><table><tbody>
+<tr><td>해당자료가 존재하지 않습니다.</td></tr>
+</tbody></table></div></body></html>
+"""
+
+
+def test_popup_access_denied_html_fails_closed(sources_crawl):
+    """[#2] 200이지만 예상 구조가 아닌 응답(Access Denied/개편) — 파일 행
+    0건을 '첨부 없음'으로 오인하지 않고 failed 마커(fail-closed)."""
+    def fetch(url, data=None):
+        return 200, "<html><body><h1>Access Denied</h1></body></html>"
+
+    atts = sources_crawl.parse_kocca_attachments(KOCCA_DETAIL_HTML, fetch)
+    failed = [a for a in atts if a.get("download_status") == "failed"]
+    assert len(failed) == 1
+    assert "0 rows" in failed[0]["download_reason"]
+
+
+def test_popup_genuinely_empty_is_not_failure(sources_crawl):
+    """[#2] 실측 마커('해당자료가 존재하지 않습니다')가 있는 정상 빈 팝업은
+    실패가 아니다 — popup1만 있고 파일이 없으면 complete:true 가능."""
+    def fetch(url, data=None):
+        return 200, KOCCA_EMPTY_POPUP_HTML
+
+    html = KOCCA_DETAIL_HTML.replace(
+        "<a href=\"javascript:openNoticeFileList2('76JNATPO10LM1AV000')\">"
+        "PMS 첨부</a>", "")
+    atts = sources_crawl.parse_kocca_attachments(html, fetch)
+    assert atts == []  # 마커 확인된 빈 팝업 — 첨부 없음
+
+
+def test_popup_access_denied_e2e_no_complete_true(sources_crawl, attach_download,
+                                                  monkeypatch, tmp_path):
+    """[#2] e2e: Access Denied HTML 주입 시 attachments_complete:true /
+    exit 0(fail-open)이 되지 않는다 — v2 + false + exit 2."""
+    def fake_urlopen(req, timeout):
+        return FakeResp(b"<html><h1>Access Denied</h1></html>", req.full_url)
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    html = KOCCA_DETAIL_HTML.replace(
+        "<a href=\"javascript:openNoticeFileList2('76JNATPO10LM1AV000')\">"
+        "PMS 첨부</a>", "")
+    jsonl = write_rec(tmp_path, "kocca.jsonl",
+                      {"source": "kocca", "id": "326D00011111", "title": "합성"})
+    with pytest.raises(SystemExit) as e:
+        sources_crawl.cmd_detail(
+            lambda url, data=None: (200, html), [KOCCA_URL],
+            str(tmp_path / "details"),
+            download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    assert e.value.code == 2
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False
+    assert rec["hash_version"] == 2
+
+
+def test_popup_403_escalates_manual_exit3_with_merge(sources_crawl,
+                                                     attach_download,
+                                                     monkeypatch, tmp_path):
+    """[#3] 팝업 403 — ManualEscalation으로 변환돼 exit 3(차단 신호)으로
+    전파되고, 그 전에 v2 + attachments_complete:false가 병합된다."""
+    import io
+    import urllib.error
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden",
+                                     email.message.Message(), io.BytesIO(b""))
+
+    monkeypatch.setattr(attach_download, "_urlopen", fake_urlopen)
+    jsonl = write_rec(tmp_path, "kocca.jsonl",
+                      {"source": "kocca", "id": "326D00011111", "title": "합성",
+                       "content_hash": "OLD_V3", "hash_version": 3,
+                       "attachments_complete": True})
+    with pytest.raises(SystemExit) as e:
+        sources_crawl.cmd_detail(
+            lambda url, data=None: (200, KOCCA_DETAIL_HTML), [KOCCA_URL],
+            str(tmp_path / "details"),
+            download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    assert e.value.code == 3  # MANUAL — 우회하지 않는다
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False  # 과거 true 잔존 금지
+    assert rec["hash_version"] == 2
+    assert rec["content_hash"] != "OLD_V3"

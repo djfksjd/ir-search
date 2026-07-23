@@ -304,7 +304,8 @@ def test_kstartup_detail_legacy_format_untouched(kstartup_crawl, monkeypatch,
 def test_bizinfo_403_attachment_still_merges_v2_incomplete(
         sources_crawl, attach_download, monkeypatch, tmp_path):
     """첨부 403(ManualEscalation) 시에도 merge_detail이 실행돼 재시도 파일의
-    과거 v3/attachments_complete:true가 v2/false로 교체된다. exit 2 유지."""
+    과거 v3/attachments_complete:true가 v2/false로 교체된다. 차단 신호는
+    exit 3(MANUAL)로 전파된다."""
     import io
     import urllib.error
 
@@ -327,7 +328,7 @@ def test_bizinfo_403_attachment_still_merges_v2_incomplete(
             lambda url, data=None: (200, html), [BIZ_URL],
             str(tmp_path / "details"),
             download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
-    assert e.value.code == 2
+    assert e.value.code == 3  # MANUAL(차단 신호)
     rec = json.loads(jsonl.read_text(encoding="utf-8"))
     assert rec["attachments_complete"] is False  # 과거 true 잔존 금지
     assert rec["hash_version"] == 2              # 과거 v3 잔존 금지
@@ -363,7 +364,7 @@ def test_kstartup_403_attachment_still_merges_v2_incomplete(
         download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
     with pytest.raises(SystemExit) as e:
         kstartup_crawl.cmd_detail(args)
-    assert e.value.code == 2
+    assert e.value.code == 3  # MANUAL(차단 신호)
     rec = json.loads(jsonl.read_text(encoding="utf-8"))
     assert rec["attachments_complete"] is False
     assert rec["hash_version"] == 2

@@ -539,6 +539,7 @@ def cmd_detail(args):
             print(f"[ir-search] {sn}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
     failures = [r for r in results if r[1].startswith(("FAIL", "PARTIAL"))]
+    manuals = [r for r in results if r[1].startswith("FAIL MANUAL")]
     print(
         f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
         f"{len(failures)} failed/partial",
@@ -546,6 +547,8 @@ def cmd_detail(args):
     )
     for sn, res in results:
         print(f"[ir-search]   {sn}: {res}", file=sys.stderr)
+    if manuals:
+        sys.exit(3)  # 차단 신호(401/403) — 우회하지 않고 수동 확인으로 전환
     if failures:
         sys.exit(2)
 

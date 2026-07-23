@@ -77,13 +77,16 @@ UA = (
 )
 
 
-def follow_redirects(do_request, url, data=None, allowed_domains=None):
+def follow_redirects(do_request, url, data=None, allowed_domains=None,
+                     robots_disallowed=()):
     """Manually follow redirects, validating EVERY hop against the allowlist.
 
     Automatic redirect following is disabled in the transports below: a
     permitted host that 302s to an external host must never make us request
     (let alone save) the external response. Each Location is resolved to an
-    absolute URL and must pass host_allowed (https + allowlist) BEFORE any
+    absolute URL and must pass host_allowed (https + allowlist) — and, when
+    *robots_disallowed* is given, attach_download.robots_allowed (robots
+    prefix/wildcard rules incl. encoding-disguise checks) — BEFORE any
     request goes out; a violating hop raises, failing that request. At most
     MAX_REDIRECTS hops are followed.
 
@@ -98,6 +101,10 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None):
             nxt = urllib.parse.urljoin(current, location)
             if not host_allowed(nxt, allowed_domains):
                 raise RuntimeError(f"redirect to non-source url blocked: {nxt[:80]}")
+            if robots_disallowed and not attach_download.robots_allowed(
+                    nxt, robots_disallowed):
+                raise RuntimeError(
+                    f"redirect to robots-disallowed url blocked: {nxt[:80]}")
             if status == 303 or body is not None:
                 body = None  # redirected form submits are re-issued as GET
             current = nxt
@@ -106,12 +113,13 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None):
     raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
 
 
-def make_fetcher(allowed_domains=None):
+def make_fetcher(allowed_domains=None, robots_disallowed=()):
     """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib.
 
     Both transports have automatic redirects DISABLED; the returned fetch
     follows redirects manually via follow_redirects(), so every hop is
-    checked against *allowed_domains* (default: ALLOWED_DOMAINS).
+    checked against *allowed_domains* (default: ALLOWED_DOMAINS) and,
+    when given, *robots_disallowed* prefixes.
     """
     try:
         from curl_cffi import requests as cr
@@ -152,7 +160,8 @@ def make_fetcher(allowed_domains=None):
         backend = "urllib"
 
     def fetch(url, data=None):
-        return follow_redirects(do_request, url, data, allowed_domains)
+        return follow_redirects(do_request, url, data, allowed_domains,
+                                robots_disallowed)
 
     return fetch, backend
 
@@ -421,7 +430,9 @@ def host_allowed(url, domains=None):
     either a typo or a downgrade attempt and is rejected.
 
     *domains* narrows the allowlist (e.g. per-source redirect checks);
-    default is the full ALLOWED_DOMAINS.
+    default is the full ALLOWED_DOMAINS. An entry prefixed with '=' matches
+    the EXACT host only (no subdomain wildcard) — e.g. '=www.kocca.kr' does
+    not admit pms.kocca.kr (attach_download.host_allowed와 동일 규약).
     """
     import urllib.parse
     if domains is None:
@@ -433,7 +444,13 @@ def host_allowed(url, domains=None):
         return False
     if parts.scheme != "https":
         return False
-    return any(host == d or host.endswith("." + d) for d in domains)
+    for d in domains:
+        if d.startswith("="):
+            if host == d[1:]:
+                return True
+        elif host == d or host.endswith("." + d):
+            return True
+    return False
 
 
 # ---- bizinfo 첨부 슬라이스 (sole-search 이식, 2026-07-23 실측) ---------------
@@ -633,12 +650,30 @@ def fetch_kocca_popup(purl):
     """KOCCA 파일 팝업 조회 — attach_download.open_validated 경유:
     각 리다이렉트 홉이 **정확한 호스트(ATTACH_HOSTS) + robots 불허 접두** 검사를
     요청 전에 통과해야 한다. 팝업이 /kocca/bbs/FileDown.do(robots 불허)나
-    pms.kocca.kr로 302해도 요청이 나가지 않는다."""
-    with attach_download.open_validated(
-            purl, ATTACH_HOSTS["kocca"], timeout=30,
-            robots_disallowed=KOCCA_ROBOTS_DISALLOWED) as r:
-        status = getattr(r, "status", None) or 200
-        return status, r.read().decode("utf-8", "replace")
+    pms.kocca.kr로 302해도 요청이 나가지 않는다.
+    401/403은 다운로드 경로와 동일하게 ManualEscalation(차단 신호 — exit 3)."""
+    import urllib.error
+    try:
+        with attach_download.open_validated(
+                purl, ATTACH_HOSTS["kocca"], timeout=30,
+                robots_disallowed=KOCCA_ROBOTS_DISALLOWED) as r:
+            status = getattr(r, "status", None) or 200
+            return status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise attach_download.ManualEscalation(
+                f"kocca 파일팝업 HTTP {e.code}") from e
+        raise
+
+
+def _kocca_popup_looks_valid(ph):
+    """파일 행 0건인 팝업이 '정상 빈 팝업'인지 판별 — 실측(2026-07-24) 구조
+    마커: 빈 팝업은 '해당자료가 존재하지 않습니다' 문구와 '공고관련자료' 헤더
+    /board_write01 테이블을 가진다. 마커가 없으면 차단/개편 응답으로 간주해
+    fail-closed(첨부 유무 불명)."""
+    if "해당자료가 존재하지 않습니다" in ph:
+        return True
+    return "공고관련자료" in ph and "board_write01" in ph
 
 
 def parse_kocca_attachments(h, popup_fetch=None):
@@ -677,9 +712,22 @@ def parse_kocca_attachments(h, popup_fetch=None):
                   f"partial로 강등: {purl[:70]}: {e}", file=sys.stderr)
             time.sleep(DELAY)
             continue
-        for m in re.finditer(
-                r"<a[^>]*fn_fileDownload\('([^']+)'\s*,\s*'?(\d+)'?\)"
-                r"[^>]*>([\s\S]*?)</a>", ph):
+        rows = list(re.finditer(
+            r"<a[^>]*fn_fileDownload\('([^']+)'\s*,\s*'?(\d+)'?\)"
+            r"[^>]*>([\s\S]*?)</a>", ph))
+        if not rows and not _kocca_popup_looks_valid(ph):
+            # 200이지만 예상 구조가 아니다(Access Denied/개편 의심) —
+            # 파일 행 0건을 "첨부 없음"으로 오인하면 fail-open이 된다.
+            out.append({"url": purl, "filename": None,
+                        "download_status": "failed",
+                        "download_reason": "popup parsed 0 rows and expected "
+                                           "structure markers missing — "
+                                           "차단/개편 의심 (fail-closed)"})
+            print(f"WARNING [ir-search] kocca 파일팝업 구조 미확인(행 0건) — "
+                  f"첨부 미확인, partial로 강등: {purl[:70]}", file=sys.stderr)
+            time.sleep(DELAY)
+            continue
+        for m in rows:
             url = ("https://www.kocca.kr/kocca/noticeFileDown.do?intcNo="
                    f"{urllib_quote(m.group(1))}&seqNo={m.group(2)}")
             if url in seen:
@@ -728,6 +776,38 @@ def source_of_url(url):
     return None
 
 
+def make_detail_fetcher():
+    """detail 페이지용 fetcher — URL의 소스를 판별해 **첨부와 동일한 호스트
+    정책(ATTACH_HOSTS: 정확한 호스트, KOCCA는 =www.kocca.kr만)** + 소스별
+    robots 불허 접두(ATTACH_ROBOTS)를 리다이렉트 홉 검사에 적용한다.
+    정상 상세 페이지가 pms.kocca.kr나 /kocca/bbs/FileDown.do(robots 불허)로
+    302해도 요청이 나가지 않는다. 4개 소스 밖의 허용 URL(K-Startup 등)은
+    기존 전체 허용 리스트 fetcher로 폴백한다."""
+    fetchers = {}
+    shown = [False]
+
+    def get(source):
+        if source not in fetchers:
+            if source is None:
+                f, backend = make_fetcher()
+            else:
+                f, backend = make_fetcher(ATTACH_HOSTS[source],
+                                          ATTACH_ROBOTS[source])
+            if not shown[0]:
+                print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
+                if backend == "urllib":
+                    print("[ir-search] tip: pip install 'curl_cffi>=0.15' "
+                          "if requests get blocked", file=sys.stderr)
+                shown[0] = True
+            fetchers[source] = f
+        return fetchers[source]
+
+    def fetch(url, data=None):
+        return get(source_of_url(url))(url, data)
+
+    return fetch
+
+
 def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete,
                  hash_version):
     """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
@@ -768,7 +848,10 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     KOCCA popup-2 attachments (pms.kocca.kr) are link-only
     ("skipped_unverified") until that contract is verified.
 
-    Exits 2 if any URL fails; a per-URL success/failure summary goes to stderr.
+    Exit codes: 0 all ok / 2 any URL failed or attachments incomplete /
+    3 blocked-signal (attachment or popup HTTP 401/403 → ManualEscalation —
+    the record is still merged as v2 + attachments_complete:false first).
+    A per-URL success/failure summary goes to stderr.
     """
     import hashlib
     import json as _json
@@ -800,14 +883,23 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             if source is not None and (download_dir or merge_into):
                 m = re.search(ATTACH_ID_PATTERNS[source], url)
                 rec_id = m.group(1) if m else None
-                attachments = collect_attachments(source, h)
+                manual = None
+                try:
+                    attachments = collect_attachments(source, h)
+                except attach_download.ManualEscalation as e:
+                    # 팝업 401/403 등 차단 신호 — 첨부 유무 불명. 병합 없이
+                    # 끊으면 재시도 파일의 과거 v3/true가 잔존하므로 failed
+                    # 마커로 기록하고 v2/incomplete 병합 후 exit 3.
+                    manual = e
+                    attachments = [{"url": url, "filename": None,
+                                    "download_status": "failed",
+                                    "download_reason": f"manual: {e}"}]
                 start_markers, end_markers = BODY_MARKERS[source]
                 text = extract_body(h, start_markers, end_markers)
                 content_hash = hashlib.sha256(text.encode()).hexdigest()
                 hash_version = attach_download.HASH_VERSION_BODY
                 complete = not attachments  # 링크만 수집: 첨부가 있으면 미검증
-                manual = None
-                if download_dir and attachments:
+                if download_dir and attachments and manual is None:
                     try:
                         attach_hashes = attach_download.process_attachments(
                             attachments, download_dir, DELAY,
@@ -881,6 +973,7 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             print(f"[ir-search] {url[:60]}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
     failures = [r for r in results if r[1].startswith(("FAIL", "PARTIAL"))]
+    manuals = [r for r in results if r[1].startswith("FAIL MANUAL")]
     print(
         f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
         f"{len(failures)} failed/partial",
@@ -888,6 +981,8 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     )
     for url, res in results:
         print(f"[ir-search]   {url[:70]}: {res}", file=sys.stderr)
+    if manuals:
+        sys.exit(3)  # 차단 신호(401/403) — 우회하지 않고 수동 확인으로 전환
     if failures:
         sys.exit(2)
 
@@ -926,14 +1021,8 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "detail":
-        # Detail URLs may point at any permitted source → full allowlist.
-        fetch, backend = make_fetcher()
-        print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
-        if backend == "urllib":
-            print(
-                "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
-                file=sys.stderr,
-            )
+        # 소스별 정확한 호스트 + robots 홉 검사 fetcher (첨부와 동일 정책)
+        fetch = make_detail_fetcher()
         cmd_detail(fetch, args.urls, args.output,
                    download_dir=args.download_dir, merge_into=args.merge_into)
         return
