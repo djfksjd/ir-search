@@ -95,6 +95,14 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None,
     import urllib.parse
 
     current, body = url, data
+    # 최초 URL도 리다이렉트 대상과 같은 정책으로 요청 전에 검증한다 —
+    # 홉만 검사하면 최초 URL로 차단 대상(pms.kocca.kr, robots 불허 경로)을
+    # 직접 넣는 경로가 뚫린다
+    if not host_allowed(current, allowed_domains):
+        raise RuntimeError(f"initial url not allowed: {current[:80]}")
+    if robots_disallowed and not attach_download.robots_allowed(
+            current, robots_disallowed):
+        raise RuntimeError(f"initial url robots-disallowed: {current[:80]}")
     for _ in range(MAX_REDIRECTS + 1):
         status, text, location = do_request(current, body)
         if status in REDIRECT_STATUSES and location:
@@ -667,13 +675,13 @@ def fetch_kocca_popup(purl):
 
 
 def _kocca_popup_looks_valid(ph):
-    """파일 행 0건인 팝업이 '정상 빈 팝업'인지 판별 — 실측(2026-07-24) 구조
-    마커: 빈 팝업은 '해당자료가 존재하지 않습니다' 문구와 '공고관련자료' 헤더
-    /board_write01 테이블을 가진다. 마커가 없으면 차단/개편 응답으로 간주해
+    """파일 행 0건인 팝업이 '정상 빈 팝업'인지 판별 — 실측(2026-07-24) 기준
+    빈 팝업은 '해당자료가 존재하지 않습니다' 명시 문구를 가진다. **명시 문구만**
+    승인한다: '공고관련자료'/board_write01 같은 레이아웃 마커는 Access Denied·
+    파일행 마크업 개편 페이지에도 남을 수 있어, 행 0건 + 레이아웃 마커만으로
+    '첨부 없음'을 승인하면 fail-open이 된다 — 그 경우는 차단/개편 의심으로
     fail-closed(첨부 유무 불명)."""
-    if "해당자료가 존재하지 않습니다" in ph:
-        return True
-    return "공고관련자료" in ph and "board_write01" in ph
+    return "해당자료가 존재하지 않습니다" in ph
 
 
 def parse_kocca_attachments(h, popup_fetch=None):

@@ -502,6 +502,42 @@ def test_popup_genuinely_empty_is_not_failure(sources_crawl):
     assert atts == []  # 마커 확인된 빈 팝업 — 첨부 없음
 
 
+def test_popup_layout_marker_without_empty_text_fails_closed(sources_crawl):
+    """[#2 재심사] '공고관련자료'/board_write01 레이아웃 마커만으로는 정상 빈
+    팝업으로 승인하지 않는다 — 레이아웃을 유지한 Access Denied·파일행 마크업
+    개편 페이지가 '첨부 없음'으로 위장되는 fail-open 차단. 명시 문구
+    '해당자료가 존재하지 않습니다'만 승인."""
+    denied_with_layout = ("<html><body><h4>공고관련자료</h4>"
+                          "<div class='board_write01'><table><tbody>"
+                          "<tr><td>Access Denied</td></tr>"
+                          "</tbody></table></div></body></html>")
+
+    def fetch(url, data=None):
+        return 200, denied_with_layout
+
+    atts = sources_crawl.parse_kocca_attachments(KOCCA_DETAIL_HTML, fetch)
+    failed = [a for a in atts if a.get("download_status") == "failed"]
+    assert len(failed) == 1  # 첨부 유무 불명 — fail-closed
+    assert not sources_crawl._kocca_popup_looks_valid(denied_with_layout)
+
+
+def test_follow_redirects_initial_url_validated(sources_crawl):
+    """[#1 재심사] 최초 URL도 요청 전에 호스트·robots 정책을 통과해야 한다 —
+    차단 대상(pms.kocca.kr / robots 불허 경로)을 최초 URL로 직접 넣는 경로 차단."""
+    do_request, requested = transport({})
+
+    with pytest.raises(RuntimeError, match="initial url not allowed"):
+        sources_crawl.follow_redirects(
+            do_request, "https://pms.kocca.kr/x",
+            allowed_domains=("=www.kocca.kr",))
+    with pytest.raises(RuntimeError, match="initial url robots-disallowed"):
+        sources_crawl.follow_redirects(
+            do_request, "https://www.kocca.kr/kocca/bbs/FileDown.do?x=1",
+            allowed_domains=("=www.kocca.kr",),
+            robots_disallowed=("/*/FileDown.do",))
+    assert requested == []  # 어느 쪽도 실요청 없음
+
+
 def test_popup_access_denied_e2e_no_complete_true(sources_crawl, attach_download,
                                                   monkeypatch, tmp_path):
     """[#2] e2e: Access Denied HTML 주입 시 attachments_complete:true /
