@@ -16,6 +16,18 @@ Usage:
   python3 sources_crawl.py list bizinfo -o bizinfo.jsonl --max-pages 20
   python3 sources_crawl.py list all -o all_sources.jsonl
   python3 sources_crawl.py detail <url> [<url> ...] -o details/
+  python3 sources_crawl.py detail <bizinfo-url> -o details/ \
+      --download-dir attachments/ [--merge-into bizinfo.jsonl]
+
+Attachment contract (bizinfo detail only for now; sole-search port):
+  --download-dir downloads every attachment with pre-validated redirects
+  (https + bizinfo.go.kr allowlist checked BEFORE each hop, max 5),
+  a 50MB streaming cap and sha256 per file. robots.txt-disallowed paths
+  (/uploads/ → /upload prefix) are recorded as links only (skipped_robots).
+  content_hash is stamped hash v3 (body + sorted attachment sha256s) ONLY
+  when every download succeeded; otherwise the body-only v2 hash is kept and
+  the record gets attachments_complete:false + exit 2 (partial).
+  NIPA/KOCCA/SMTECH attachments are deferred until fixtures exist (#13).
 
 Unified JSONL schema:
   {"source", "id", "title", "field", "org", "apply_start", "apply_end",
@@ -48,6 +60,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 from run_manifest import make_run, update_manifest  # noqa: E402
+import attach_download  # noqa: E402 — 첨부 다운로드 공용 모듈 (hash v2/v3)
 
 DELAY = 0.4  # seconds between requests (politeness)
 MAX_REDIRECTS = 5
@@ -417,16 +430,98 @@ def host_allowed(url, domains=None):
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
-def cmd_detail(fetch, urls, outdir):
+# ---- bizinfo 첨부 슬라이스 (sole-search 이식, 2026-07-23 실측) ---------------
+
+# robots.txt(2026-07-23 확인)가 /upload·/download 접두를 불허한다 —
+# /uploads/ 첨부 링크는 수집하되 다운로드하지 않는다(skipped_robots).
+BIZINFO_ROBOTS_DISALLOWED = ("/super", "/upload", "/html", "/images", "/agspa",
+                             "/error", "/common", "/lib", "/WEB-INF",
+                             "/download", "/direct_do")
+
+# 본문 시작 마커 — 여는 태그만 잡는다 (중첩 div를 regex로 균형 매칭할 수 없으므로)
+BIZINFO_START_MARKERS = (r'<div[^>]+class="[^"]*view_cont[^"]*"',
+                         r'<div[^>]+id="print_area"')
+# 본문 끝 마커 — 시작 마커부터 푸터/다음 주요 섹션까지를 본문으로 자른다
+BIZINFO_END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b',
+                       r'<div[^>]+class="[^"]*footer',
+                       r'<div[^>]+class="[^"]*btn_area',
+                       r'<div[^>]+class="[^"]*paging',
+                       r'목록으로|이전글|다음글')
+
+
+def extract_body(h, start_markers=BIZINFO_START_MARKERS,
+                 end_markers=BIZINFO_END_MARKERS):
+    """시작 마커 ~ 첫 끝 마커(없으면 문서 끝) 구간의 텍스트. 마커 미발견 시 전체 폴백."""
+    sm = None
+    for p in start_markers:
+        sm = re.search(p, h)
+        if sm:
+            break
+    seg = h[sm.start():] if sm else h
+    ends = [m.start() for p in end_markers for m in [re.search(p, seg)] if m]
+    if ends:
+        seg = seg[:min(ends)]
+    return strip_html(seg)
+
+
+def parse_bizinfo_attachments(h):
+    """상세 페이지의 첨부 링크(/cmm/fms/, /uploads/) 목록 — sole-search와 동일 계약."""
+    attach = [htmllib.unescape(u) for u in
+              re.findall(r'href="(/cmm/fms/[^"]+|/uploads/[^"]+)"', h)]
+    seen = []
+    for a in attach:
+        if a not in seen:
+            seen.append(a)
+    return [{"url": "https://www.bizinfo.go.kr" + a,
+             "filename": a.rsplit("/", 1)[-1].split("?")[0]} for a in seen]
+
+
+def merge_detail(jsonl_path, source, rec_id, content_hash, attachments, complete,
+                 hash_version):
+    """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
+    import json as _json
+    tmp = jsonl_path + ".tmp"
+    found = False
+    with open(jsonl_path, encoding="utf-8") as src, \
+            open(tmp, "w", encoding="utf-8") as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            r = _json.loads(line)
+            if r.get("source") == source and str(r.get("id")) == str(rec_id):
+                r["content_hash"] = content_hash
+                if content_hash is not None:
+                    r["hash_version"] = hash_version
+                else:
+                    r.pop("hash_version", None)  # 해시 없음 = 산식 버전도 무의미
+                r["attachments"] = attachments
+                r["attachments_complete"] = complete
+                found = True
+            dst.write(_json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, jsonl_path)
+    return found
+
+
+def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
     """Save the text of announcement detail pages (any source) for eligibility checks.
+
+    With --download-dir (bizinfo detail URLs only for now): also collects the
+    attachment links, downloads them under the sole-search security contract
+    (pre-validated redirects, 50MB cap, sha256) and stamps hash v3
+    (body + sorted attachment sha256s) ONLY when every download succeeded.
+    Any failed/blocked/robots-skipped attachment keeps the body-only v2 hash
+    with attachments_complete=false and turns the run into partial (exit 2).
+    NIPA/KOCCA/SMTECH attachment support is deferred until per-source fixtures
+    exist (issue #13 agreement); their pages are saved text-only as before.
 
     Exits 2 if any URL fails; a per-URL success/failure summary goes to stderr.
     """
     import hashlib
+    import json as _json
     import os
 
     os.makedirs(outdir, exist_ok=True)
-    results = []  # (url, "OK path" | "FAIL reason")
+    results = []  # (url, "OK path" | "FAIL reason" | "PARTIAL reason")
     for url in urls:
         if not host_allowed(url):
             results.append((url, "FAIL non-source host"))
@@ -438,21 +533,82 @@ def cmd_detail(fetch, urls, outdir):
                 results.append((url, f"FAIL HTTP {status}"))
                 print(f"[ir-search] {url[:60]}: HTTP {status}", file=sys.stderr)
                 continue
-            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+            digest8 = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
             name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
-            path = f"{outdir}/{name}_{digest}.txt"
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(url + "\n\n" + strip_html(h))
-            results.append((url, f"OK {path}"))
-            print(f"[ir-search] saved: {path}", file=sys.stderr)
+            path = f"{outdir}/{name}_{digest8}.txt"
+
+            is_bizinfo = host_allowed(url, SOURCE_DOMAINS["bizinfo"])
+            if (download_dir or merge_into) and not is_bizinfo:
+                print("[ir-search] NOTE: 첨부 다운로드/병합은 현재 bizinfo 상세만 "
+                      "지원 (K-Startup은 kstartup_crawl.py detail --download-dir; "
+                      "NIPA/KOCCA/SMTECH는 fixture 확보 후) — 본문만 저장: "
+                      f"{url[:60]}", file=sys.stderr)
+
+            if is_bizinfo and (download_dir or merge_into):
+                attachments = parse_bizinfo_attachments(h)
+                text = extract_body(h)
+                content_hash = hashlib.sha256(text.encode()).hexdigest()
+                hash_version = attach_download.HASH_VERSION_BODY
+                complete = not attachments  # 링크만 수집: 첨부가 있으면 미검증
+                if download_dir and attachments:
+                    attach_hashes = attach_download.process_attachments(
+                        attachments, download_dir, DELAY,
+                        SOURCE_DOMAINS["bizinfo"], BIZINFO_ROBOTS_DISALLOWED)
+                    complete = all(f.get("download_status") == "ok"
+                                   for f in attachments)
+                    if complete:
+                        # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가
+                        content_hash = attach_download.content_hash_of(
+                            text, attach_hashes)
+                        hash_version = attach_download.HASH_VERSION_ATTACH
+                    # else: 본문만의 v2 해시 유지 — None으로 지우면 반복 실패
+                    # 두 런 사이의 본문 변경이 diff에서 숨는다.
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(url + "\n")
+                    f.write("CONTENT_HASH: " + content_hash + "\n")
+                    f.write(f"HASH_VERSION: {hash_version}\n")
+                    f.write("ATTACHMENTS: "
+                            + _json.dumps(attachments, ensure_ascii=False) + "\n\n")
+                    f.write(text)
+                if merge_into:
+                    m = re.search(r"pblancId=(PBLN_\d+)", url)
+                    if m and not merge_detail(merge_into, "bizinfo", m.group(1),
+                                              content_hash, attachments, complete,
+                                              hash_version):
+                        results.append((url, f"FAIL merge: {m.group(1)} not in "
+                                             f"{merge_into}"))
+                        print(f"[ir-search] WARNING: {m.group(1)} 레코드를 "
+                              f"{merge_into}에서 못 찾음", file=sys.stderr)
+                        time.sleep(DELAY)
+                        continue
+                if not complete:
+                    bad = [f.get("filename", "?") for f in attachments
+                           if f.get("download_status") != "ok"]
+                    results.append((url, f"PARTIAL attachments incomplete "
+                                         f"({len(bad)}): {', '.join(bad[:5])}"))
+                    print(f"WARNING [ir-search] 첨부 {len(bad)}건 실패/생략 — "
+                          "hash v2 유지, attachments_complete=false (partial)",
+                          file=sys.stderr)
+                else:
+                    results.append((url, f"OK {path}"))
+                print(f"[ir-search] saved: {path}", file=sys.stderr)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(url + "\n\n" + strip_html(h))
+                results.append((url, f"OK {path}"))
+                print(f"[ir-search] saved: {path}", file=sys.stderr)
+        except attach_download.ManualEscalation as e:
+            results.append((url, f"FAIL MANUAL {e}"))
+            print(f"MANUAL [ir-search] 첨부 401/403 — 우회하지 않고 수동 확인으로 "
+                  f"전환: {e}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 — record failure, keep going
             results.append((url, f"FAIL {e}"))
             print(f"[ir-search] {url[:60]}: error {e}", file=sys.stderr)
         time.sleep(DELAY)
-    failures = [r for r in results if r[1].startswith("FAIL")]
+    failures = [r for r in results if r[1].startswith(("FAIL", "PARTIAL"))]
     print(
         f"[ir-search] detail summary: {len(results) - len(failures)} ok, "
-        f"{len(failures)} failed",
+        f"{len(failures)} failed/partial",
         file=sys.stderr,
     )
     for url, res in results:
@@ -481,6 +637,15 @@ def main():
     p_det = sub.add_parser("detail", help="save detail-page text for given URLs")
     p_det.add_argument("urls", nargs="+", help="announcement detail URLs")
     p_det.add_argument("-o", "--output", default="details")
+    p_det.add_argument(
+        "--download-dir",
+        help="bizinfo 첨부를 이 폴더에 다운로드 — 전부 성공 시에만 hash v3 스탬프, "
+        "불완전이면 본문 v2 유지 + attachments_complete:false + exit 2",
+    )
+    p_det.add_argument(
+        "--merge-into",
+        help="bizinfo 목록 jsonl에 content_hash/hash_version/attachments를 병합",
+    )
 
     args = ap.parse_args()
 
@@ -493,7 +658,8 @@ def main():
                 "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
                 file=sys.stderr,
             )
-        cmd_detail(fetch, args.urls, args.output)
+        cmd_detail(fetch, args.urls, args.output,
+                   download_dir=args.download_dir, merge_into=args.merge_into)
         return
 
     names = list(SOURCES) if args.source == "all" else [args.source]

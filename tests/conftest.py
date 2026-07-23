@@ -45,6 +45,16 @@ def run_manifest():
 
 
 @pytest.fixture(scope="session")
+def attach_download():
+    # 크롤러들이 `import attach_download`로 참조하는 것과 **같은 모듈 인스턴스**를
+    # 돌려준다 — load_script로 새로 만들면 monkeypatch가 크롤러 쪽에 안 먹는다.
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    import attach_download as mod
+    return mod
+
+
+@pytest.fixture(scope="session")
 def fixture_html():
     def read(name):
         return (FIXTURES_DIR / name).read_text(encoding="utf-8")

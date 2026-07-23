@@ -116,6 +116,26 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/kstartup_crawl.py" detai
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/sources_crawl.py" detail <url> <url> ... -o details/
 ```
 
+**첨부 다운로드 (`--download-dir`)** — 본문이 첨부파일(HWP/PDF)에만 있는 공고를 검증할 때 쓴다. 현재 **기업마당(bizinfo)과 K-Startup detail만** 지원한다 (NIPA/KOCCA/SMTECH는 소스별 fixture 확보 후 — 이슈 #13):
+
+```bash
+# 기업마당: 첨부 다운로드 + 목록 jsonl에 해시·첨부 병합
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/sources_crawl.py" detail <bizinfo-url> \
+    -o details/ --download-dir attachments/ --merge-into bizinfo.jsonl
+# K-Startup: 첨부 링크 수집 + 본문 해시 (아래 robots 주의)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/kstartup_crawl.py" detail <pbancSn> \
+    -o details/ --download-dir attachments/ --merge-into kstartup_all.jsonl
+```
+
+동작 계약:
+
+- **보안**: 모든 다운로드는 자동 리다이렉트를 끄고 각 Location을 **요청을 보내기 전에** https+소스별 허용 호스트(bizinfo.go.kr / k-startup.go.kr)로 검증한다(최대 5홉, 위반 시 `blocked_redirect`). 파일당 50MB 스트리밍 상한, sha256 기록, 서버 파일명은 정제(latin-1→UTF-8 모지바케 복구 + basename)해서만 저장한다.
+- **robots 준수 — 우회 금지**: robots.txt 불허 경로의 첨부는 다운로드하지 않고 **링크만** 기록한다(`download_status: "skipped_robots"`). 기업마당은 `/uploads/…`가, **K-Startup은 첨부 다운로드 경로 전체(`/afile/…`)가 불허다(2026-07-23 확인)** — 따라서 K-Startup 첨부는 항상 링크만 남고, 내용 확인이 필요하면 사용자에게 브라우저에서 직접 내려받으라고 안내한다.
+- **hash v3의 의미**: 첨부가 **전부** 다운로드 성공했을 때만 `content_hash`가 v3(본문 + 정렬된 첨부 sha256 결합)로 스탬프된다(`hash_version: 3`). v2(본문만)와 v3는 비교 불가 — diff가 hash_version 불일치를 1회 CHANGED(상세 재검증)로 흡수한다.
+- **불완전 시 동작**: 첨부가 하나라도 실패·차단·robots 생략이면 **본문만의 v2 해시를 유지**하고(`hash_version: 2` — None으로 지우지 않는다, 지우면 반복 실패 사이의 본문 변경이 diff에서 숨는다) `attachments_complete: false` + **exit 2(partial)** 로 끝난다. 이 경우 보고서 한계 고지에 "첨부 미검증"을 명시한다.
+- `--merge-into`는 목록 jsonl의 해당 레코드에 `content_hash / hash_version / attachments / attachments_complete`를 원자적으로 병합한다.
+- 401/403은 우회하지 않고 MANUAL로 전환한다(수동 확인 안내).
+
 각 건에서 확인할 것 (없으면 '불명'으로 기록):
 - **신청대상** — 예비창업자 가능 여부 명시 확인 ("예비창업자 포함/및" 문구, 예비용 별도 서식 존재 여부). 사업자등록증·4대보험 명부·재무제표 요구 = 사실상 기창업만
 - **지역제한** — 소재 요건 vs 접수 자격 구분 ("전국 접수, 비수도권 소재만" 같은 조합 주의)
@@ -150,7 +170,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/sources_crawl.py" detail
 - 창조경제혁신센터 통합 목록(ccei.creativekorea.or.kr)은 JS 로딩이라 크롤러에서 제외 — 다만 혁신센터 공고 다수가 K-Startup에 게재되므로 실질 커버됨
 - 일반 curl은 TLS 지문으로 차단될 수 있다 — curl_cffi `impersonate='safari'`로 접근 (스크립트 내장, 미설치 시 안내)
 - 카테고리 분포 참고: 멘토링·교육이 약 1/3, 시설·공간 ~25%, 사업화 ~20%. **융자·보증은 거의 없다** — 예비 단계 자금은 경진대회·사업화 지원금 경로가 사실상 전부
-- 상세페이지는 요약 필드만 있고 본문이 첨부파일(HWP/PDF)인 경우가 있다 — 그 경우 "본문은 첨부 참조 + 문의처"로 기록
+- 상세페이지는 요약 필드만 있고 본문이 첨부파일(HWP/PDF)인 경우가 있다 — 기업마당은 `--download-dir`로 첨부를 내려받아 확인할 수 있고, K-Startup은 첨부 경로가 robots 불허라 "본문은 첨부 참조(링크) + 문의처"로 기록한다
 - 마감 표기 "D-1"이어도 접수시각(14:00, 16:00 마감 등)이 다르다 — 시각까지 기재
 
 ## 윤리·안전 규칙
