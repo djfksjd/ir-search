@@ -22,6 +22,10 @@ Exit codes (fail-closed contract):
      page cap reached while new items were still appearing, or (detail mode)
      one or more detail fetches failed.
 Callers MUST treat exit 2 as incomplete coverage, never as a clean success.
+
+Every `list` run (ok or partial) also writes/merges `run_manifest.json`
+(schema v1, see run_manifest.py) next to the output jsonl, atomically.
+Coverage reporting reads that file, not the stderr summary.
 """
 import argparse
 import html as htmllib
@@ -31,10 +35,63 @@ import re
 import sys
 import time
 
-BASE = "https://www.k-startup.go.kr/web/contents/bizpbanc-ongoing.do"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from run_manifest import make_run, update_manifest  # noqa: E402
+
+BASE ="https://www.k-startup.go.kr/web/contents/bizpbanc-ongoing.do"
 DETAIL_URL = BASE + "?schM=view&pbancSn={sn}"
 DELAY = 0.3  # seconds between requests (politeness)
 MIN_EXPECTED = 50  # K-Startup normally lists 250+ open announcements
+ALLOWED_DOMAINS = ("k-startup.go.kr",)
+MAX_REDIRECTS = 5
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+)
+
+
+def host_allowed(url, domains=None):
+    """Exact-match domain check on the URL's real hostname (https only)."""
+    import urllib.parse
+    if domains is None:
+        domains = ALLOWED_DOMAINS
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if parts.scheme != "https":
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def follow_redirects(do_request, url, allowed_domains=None):
+    """Manually follow redirects, validating EVERY hop against the allowlist.
+
+    Automatic redirect following is disabled in the transports: K-Startup
+    302-ing to an external host must never make us request (let alone save)
+    the external response. Each Location is resolved to an absolute URL and
+    must pass host_allowed (https + allowlist) BEFORE any request goes out;
+    a violating hop raises, failing that request. Max MAX_REDIRECTS hops.
+
+    do_request(url) -> (status, text, location-header-or-None).
+    """
+    import urllib.parse
+
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        status, text, location = do_request(current)
+        if status in REDIRECT_STATUSES and location:
+            nxt = urllib.parse.urljoin(current, location)
+            if not host_allowed(nxt, allowed_domains):
+                raise RuntimeError(f"redirect to non-source url blocked: {nxt[:80]}")
+            current = nxt
+            continue
+        return status, text
+    raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
 
 
 def norm_date(s):
@@ -50,34 +107,48 @@ def norm_date(s):
 
 
 def make_fetcher():
-    """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib."""
+    """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib.
+
+    Both transports have automatic redirects DISABLED; the returned fetch
+    follows redirects manually via follow_redirects(), so every hop is
+    checked against ALLOWED_DOMAINS (https-only, k-startup.go.kr).
+    """
     try:
         from curl_cffi import requests as cr
 
         sess = cr.Session(impersonate="safari")
 
-        def fetch(url):
-            r = sess.get(url, timeout=30)
-            return r.status_code, r.text
+        def do_request(url):
+            r = sess.get(url, timeout=30, allow_redirects=False)
+            return r.status_code, r.text, r.headers.get("location")
 
-        return fetch, "curl_cffi"
+        backend = "curl_cffi"
     except ImportError:
+        import urllib.error
         import urllib.request
 
-        def fetch(url):
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-                    )
-                },
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None  # surface 3xx as HTTPError instead of following
 
-        return fetch, "urllib"
+        opener = urllib.request.build_opener(_NoRedirect())
+
+        def do_request(url):
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            try:
+                with opener.open(req, timeout=30) as resp:
+                    return resp.status, resp.read().decode("utf-8", "replace"), None
+            except urllib.error.HTTPError as e:
+                if e.code in REDIRECT_STATUSES:
+                    return e.code, "", e.headers.get("Location")
+                raise
+
+        backend = "urllib"
+
+    def fetch(url):
+        return follow_redirects(do_request, url, ALLOWED_DOMAINS)
+
+    return fetch, backend
 
 
 def parse_list(html):
@@ -142,6 +213,8 @@ def cmd_list(args):
     seen = {}
     page = 1
     pages_done = 0
+    duplicates = 0
+    errors = []  # short strings for run_manifest.json
     partial = False  # network/HTTP failure mid-crawl
     no_new_streak = 0
     last_page_had_new = False
@@ -155,6 +228,7 @@ def cmd_list(args):
                 status, html = code, ""
             else:
                 print(f"[ir-search] page {page}: network error: {e}", file=sys.stderr)
+                errors.append(f"page {page}: network error: {e}")
                 partial = True
                 stop_reason = "network-error"
                 break
@@ -165,9 +239,13 @@ def cmd_list(args):
                     "[ir-search] looks blocked; pip install 'curl_cffi>=0.15' and retry.",
                     file=sys.stderr,
                 )
+            errors.append(f"page {page}: HTTP {status}")
             partial = True
             stop_reason = f"http-{status}"
             break
+        # A 200 response was received → the page WAS fetched; count it now,
+        # before parsing, so a parse-failure page still shows up in coverage.
+        pages_done = page
         items = parse_list(html)
         if page == 1 and not items:
             print(
@@ -175,11 +253,16 @@ def cmd_list(args):
                 file=sys.stderr,
             )
             print(f"[ir-search] {args.output} NOT written (no data)", file=sys.stderr)
+            update_manifest(args.output, [make_run(
+                "kstartup", "partial", 2, pages_fetched=pages_done, collected=0,
+                stop_reason="parse-failure",
+                errors=["page 1 parsed 0 items — site structure may have changed"],
+            )])
             sys.exit(2)
         new = [i for i in items if i["pbancSn"] not in seen]
+        duplicates += len(items) - len(new)
         for i in items:
             seen[i["pbancSn"]] = i
-        pages_done = page
         last_page_had_new = bool(new)
         print(
             f"[ir-search] page {page}: {len(items)} parsed, {len(new)} new, total {len(seen)}",
@@ -222,6 +305,9 @@ def cmd_list(args):
             f"(--max-pages {args.max_pages}, last page still had new items)",
             file=sys.stderr,
         )
+        errors.append(
+            f"page cap reached at p{args.max_pages} — collection may be INCOMPLETE"
+        )
         fail = True
     min_expected = args.min_expected
     if min_expected > 0 and len(seen) < min_expected:
@@ -231,7 +317,21 @@ def cmd_list(args):
             "genuinely low season? re-run with --min-expected 0 to accept)",
             file=sys.stderr,
         )
+        errors.append(
+            f"only {len(seen)} items collected (< {min_expected} minimum expected)"
+        )
         fail = True
+    manifest_path = update_manifest(args.output, [make_run(
+        "kstartup",
+        "partial" if fail else "ok",
+        2 if fail else 0,
+        pages_fetched=pages_done,
+        collected=len(seen),
+        stop_reason=stop_reason,
+        errors=errors,
+        duplicates=duplicates,
+    )])
+    print(f"[ir-search] manifest: {manifest_path}", file=sys.stderr)
     if fail:
         sys.exit(2)
 

@@ -1,0 +1,19 @@
+{
+  "skill_name": "ir-search",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "petfood-preentrepreneur-daegu",
+      "prompt": "나한테 맞는 정부 지원사업 조사해줘. 이 폴더 README에 아이템 정보 있어. 나는 대구 사는 32살이고 아직 사업자등록 안 한 예비창업자야. 자금이랑 식품 제조 가능한 공간이 필요해. 시간 아끼게 상세 검증은 가장 유력한 10건만 해줘.",
+      "expected_output": "K-Startup 전수 수집 후 예비창업자·대구/전국 기준으로 필터, 상세 검증 10건, A(즉시)/B(요건후)/C(변형) 분류 보고서 md + jsonl 저장, 모든 추천에 공고 URL·마감일, 마감 지난 공고 없음",
+      "files": ["fixtures/petfood-d2c"]
+    },
+    {
+      "id": 1,
+      "eval_name": "fintech-saas-seoul-bizinfo",
+      "prompt": "우리 회사에 맞는 지원사업 찾아줘. 폴더 README 참고. K-Startup만 말고 기업마당도 포함해서 조사해줘. 상세 검증은 유력한 8건만.",
+      "expected_output": "K-Startup + 기업마당 두 소스 수집, 법인 2년차·서울 기준 필터(예비창업 전용 사업 제외), R&D/스케일업/글로벌 중심 보고서, 소스 표기, URL·마감일 포함",
+      "files": ["fixtures/fintech-saas"]
+    }
+  ]
+}
