@@ -153,8 +153,12 @@ def robots_allowed(url, disallowed_prefixes):
     else:
         return False  # 상한 내 고정점 미도달(과도한 다중 인코딩) — fail-closed
     for c in list(candidates):
-        # /a/../uploads 류 경로 정규화 형태도 함께 검사
-        candidates.append(os.path.normpath(c))
+        # /a/../uploads 류 경로 정규화 형태도 함께 검사.
+        # POSIX normpath는 선행 '//'를 보존한다 — /%2Fuploads가 디코딩 후
+        # //uploads로 남아 startswith(/uploads)를 피하므로, 선행 슬래시를
+        # 단일화한 후보도 추가한다
+        n = os.path.normpath(c)
+        candidates.extend([n, re.sub(r"^/+", "/", c), re.sub(r"^/+", "/", n)])
     return not any(c.startswith(p) for c in candidates for p in disallowed_prefixes)
 
 

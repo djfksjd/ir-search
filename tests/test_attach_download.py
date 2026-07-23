@@ -321,6 +321,12 @@ def test_robots_percent_encoded_path_blocked(attach_download):
         "https://www.bizinfo.go.kr/%2575ploads/a.hwp", BIZ_ROBOTS)  # 이중 인코딩
     assert not attach_download.robots_allowed(
         "https://www.bizinfo.go.kr/x/../uploads/a.hwp", BIZ_ROBOTS)  # normpath
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/%2Fuploads/a.hwp", BIZ_ROBOTS)  # → //uploads
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr//uploads/a.hwp", BIZ_ROBOTS)  # 직접 이중 슬래시
+    assert not attach_download.robots_allowed(
+        "https://www.bizinfo.go.kr/%2F%2Fuploads/a.hwp", BIZ_ROBOTS)  # ///uploads
     # 정상 경로는 여전히 허용
     assert attach_download.robots_allowed(
         "https://www.bizinfo.go.kr/cmm/fms/getFile.do", BIZ_ROBOTS)
