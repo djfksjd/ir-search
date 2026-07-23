@@ -74,7 +74,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/sources_crawl.py" list b
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/ir-search/scripts/sources_crawl.py" list all -o sources_all.jsonl
 ```
 
-**크롤러 종료코드 계약**: 0 = 전체 수집 성공 / 2 = partial(네트워크 오류·구조 변경·페이지 캡·소스 일부 실패). **exit 2면 partial이다 — 어떤 소스가 어디까지 수집됐는지 보고서의 커버리지(한계 고지)에 기록하고, 절대 "0건이지만 성공"으로 취급하지 않는다.** jsonl은 partial이어도 수집분까지는 저장돼 있다.
+**크롤러 종료코드 계약**: 0 = 전체 수집 성공 / 2 = partial(네트워크 오류·구조 변경·페이지 캡·소스 일부 실패). **exit 2면 partial이다 — 절대 "0건이지만 성공"으로 취급하지 않는다.** jsonl은 partial이어도 수집분까지는 저장돼 있다.
+
+**커버리지 기록 — `run_manifest.json` 기준**: 두 크롤러 모두 `list` 실행이 끝나면(성공·partial 모두) 출력 jsonl **옆에 `run_manifest.json`(schema v1)을 원자적으로 기록**한다. 소스별 run 항목에 `status(ok/partial)·exit_code·pages_fetched·collected·duplicates·stop_reason·errors`가 들어 있고, 같은 폴더에 여러 소스를 수집하면(`all` 모드 포함) 소스별 항목이 한 파일에 누적된다(같은 소스는 최신으로 교체). **보고서의 커버리지(한계 고지)는 stderr 메시지가 아니라 이 파일을 읽어 작성한다** — 어떤 소스가 몇 페이지까지·몇 건 수집됐고 왜 멈췄는지(stop_reason·errors)를 그대로 옮긴다. status가 `partial`인 소스는 "미완 수집"으로 명시한다. manifest에는 카운트·상태만 있고 검색어·프로필·공고 본문은 넣지 않는다.
 
 **소스 선택 매트릭스** — 프로필에서 도출한 필요에 따라 K-Startup에 추가한다:
 

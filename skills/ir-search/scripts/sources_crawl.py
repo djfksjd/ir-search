@@ -31,53 +31,111 @@ Exit codes (fail-closed contract):
      at least one URL failed. Whatever was collected IS still written to the
      output file; exit 2 means coverage is incomplete, not that the file is
      empty. Callers MUST NOT treat exit 2 as a clean success.
+
+Every `list` run (ok or partial) also writes/merges `run_manifest.json`
+(schema v1, see run_manifest.py) next to the output jsonl — one run entry
+per source, atomically replaced. Coverage reporting reads that file.
 """
 import argparse
 import html as htmllib
 import json
+import os
 import re
 import sys
 import time
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from run_manifest import make_run, update_manifest  # noqa: E402
+
 DELAY = 0.4  # seconds between requests (politeness)
+MAX_REDIRECTS = 5
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+)
 
 
-def make_fetcher():
-    """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib."""
+def follow_redirects(do_request, url, data=None, allowed_domains=None):
+    """Manually follow redirects, validating EVERY hop against the allowlist.
+
+    Automatic redirect following is disabled in the transports below: a
+    permitted host that 302s to an external host must never make us request
+    (let alone save) the external response. Each Location is resolved to an
+    absolute URL and must pass host_allowed (https + allowlist) BEFORE any
+    request goes out; a violating hop raises, failing that request. At most
+    MAX_REDIRECTS hops are followed.
+
+    do_request(url, data) -> (status, text, location-header-or-None).
+    """
+    import urllib.parse
+
+    current, body = url, data
+    for _ in range(MAX_REDIRECTS + 1):
+        status, text, location = do_request(current, body)
+        if status in REDIRECT_STATUSES and location:
+            nxt = urllib.parse.urljoin(current, location)
+            if not host_allowed(nxt, allowed_domains):
+                raise RuntimeError(f"redirect to non-source url blocked: {nxt[:80]}")
+            if status == 303 or body is not None:
+                body = None  # redirected form submits are re-issued as GET
+            current = nxt
+            continue
+        return status, text
+    raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
+
+
+def make_fetcher(allowed_domains=None):
+    """Prefer curl_cffi (Safari TLS fingerprint); fall back to urllib.
+
+    Both transports have automatic redirects DISABLED; the returned fetch
+    follows redirects manually via follow_redirects(), so every hop is
+    checked against *allowed_domains* (default: ALLOWED_DOMAINS).
+    """
     try:
         from curl_cffi import requests as cr
 
         sess = cr.Session(impersonate="safari")
 
-        def fetch(url, data=None):
+        def do_request(url, data=None):
             # data=dict switches to a POST form submit (some boards paginate that way)
             if data is None:
-                r = sess.get(url, timeout=30)
+                r = sess.get(url, timeout=30, allow_redirects=False)
             else:
-                r = sess.post(url, data=data, timeout=30)
-            return r.status_code, r.text
+                r = sess.post(url, data=data, timeout=30, allow_redirects=False)
+            return r.status_code, r.text, r.headers.get("location")
 
-        return fetch, "curl_cffi"
+        backend = "curl_cffi"
     except ImportError:
+        import urllib.error
         import urllib.parse
         import urllib.request
 
-        def fetch(url, data=None):
-            body = urllib.parse.urlencode(data).encode() if data is not None else None
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-                    )
-                },
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None  # surface 3xx as HTTPError instead of following
 
-        return fetch, "urllib"
+        opener = urllib.request.build_opener(_NoRedirect())
+
+        def do_request(url, data=None):
+            body = urllib.parse.urlencode(data).encode() if data is not None else None
+            req = urllib.request.Request(url, data=body, headers={"User-Agent": UA})
+            try:
+                with opener.open(req, timeout=30) as resp:
+                    return resp.status, resp.read().decode("utf-8", "replace"), None
+            except urllib.error.HTTPError as e:
+                if e.code in REDIRECT_STATUSES:
+                    return e.code, "", e.headers.get("Location")
+                raise
+
+        backend = "urllib"
+
+    def fetch(url, data=None):
+        return follow_redirects(do_request, url, data, allowed_domains)
+
+    return fetch, backend
 
 
 def clean(s):
@@ -248,18 +306,31 @@ SOURCES = {
     "smtech": page_smtech,
 }
 
+# Per-source redirect allowlist: a bizinfo list crawl must not be redirected
+# even to another *permitted* source's host — each source gets only its own.
+SOURCE_DOMAINS = {
+    "bizinfo": ("bizinfo.go.kr",),
+    "nipa": ("nipa.kr",),
+    "kocca": ("kocca.kr",),
+    "smtech": ("smtech.go.kr",),
+}
+
 
 def crawl(source, fetch, max_pages):
-    """Crawl one source. Returns (items, error).
+    """Crawl one source. Returns (items, error, stats).
 
     error is None on full success; otherwise a short reason string. Items
     collected before a mid-crawl failure are always returned (preserved).
+    stats is a dict for run_manifest.json: {"pages_fetched", "duplicates",
+    "stop_reason"}.
     """
     pager = SOURCES[source]
     seen = {}
     error = None
     no_new_streak = 0
     stop_reason = None
+    pages_done = 0
+    duplicates = 0
     for page in range(1, max_pages + 1):
         try:
             items, has_more = pager(fetch, page)
@@ -268,11 +339,15 @@ def crawl(source, fetch, max_pages):
             error = f"page {page}: " + (f"HTTP {code}" if code is not None else str(e))
             stop_reason = "error"
             break
+        # pager() returned → the HTTP response was received; count the page
+        # even if it parses to 0 items (fail-closed path below).
+        pages_done = page
         if page == 1 and not items:
             error = "page 1 parsed 0 items — site structure may have changed"
             stop_reason = "error"
             break
         new = [i for i in items if i["id"] not in seen]
+        duplicates += len(items) - len(new)
         for i in items:
             seen[i["id"]] = i
         print(
@@ -300,7 +375,12 @@ def crawl(source, fetch, max_pages):
             error = f"page cap reached at p{max_pages} — collection may be INCOMPLETE"
     print(f"[ir-search] {source}: stop reason: {stop_reason}"
           + (f" ({error})" if error else ""), file=sys.stderr)
-    return list(seen.values()), error
+    stats = {
+        "pages_fetched": pages_done,
+        "duplicates": duplicates,
+        "stop_reason": stop_reason,
+    }
+    return list(seen.values()), error, stats
 
 
 def strip_html(text):
@@ -313,18 +393,28 @@ def strip_html(text):
 ALLOWED_DOMAINS = ("bizinfo.go.kr", "nipa.kr", "kocca.kr", "smtech.go.kr", "k-startup.go.kr")
 
 
-def host_allowed(url):
-    """Exact-match domain check on the URL's real hostname.
+def host_allowed(url, domains=None):
+    """Exact-match domain check on the URL's real hostname (https only).
 
     Uses urlsplit().hostname so userinfo/port tricks ("bizinfo.go.kr:443@evil.example")
-    cannot spoof the allowlist — naive string slicing was bypassable.
+    cannot spoof the allowlist — naive string slicing was bypassable. The scheme
+    must be https: every allowed source serves https, so a plain-http URL is
+    either a typo or a downgrade attempt and is rejected.
+
+    *domains* narrows the allowlist (e.g. per-source redirect checks);
+    default is the full ALLOWED_DOMAINS.
     """
     import urllib.parse
+    if domains is None:
+        domains = ALLOWED_DOMAINS
     try:
-        host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower().rstrip(".")
     except ValueError:
         return False
-    return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
+    if parts.scheme != "https":
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
 
 
 def cmd_detail(fetch, urls, outdir):
@@ -394,34 +484,59 @@ def main():
 
     args = ap.parse_args()
 
-    fetch, backend = make_fetcher()
-    print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
-    if backend == "urllib":
-        print(
-            "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
-            file=sys.stderr,
-        )
-
     if args.cmd == "detail":
+        # Detail URLs may point at any permitted source → full allowlist.
+        fetch, backend = make_fetcher()
+        print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
+        if backend == "urllib":
+            print(
+                "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
+                file=sys.stderr,
+            )
         cmd_detail(fetch, args.urls, args.output)
         return
 
     names = list(SOURCES) if args.source == "all" else [args.source]
     out = []
     failed = {}  # source -> reason
+    runs = []  # run_manifest.json entries, one per source
+    backend_shown = False
     for name in names:
+        # Per-source fetcher: redirects may only stay on that source's host.
+        fetch, backend = make_fetcher(SOURCE_DOMAINS[name])
+        if not backend_shown:
+            print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
+            if backend == "urllib":
+                print(
+                    "[ir-search] tip: pip install 'curl_cffi>=0.15' if requests get blocked",
+                    file=sys.stderr,
+                )
+            backend_shown = True
         try:
-            items, error = crawl(name, fetch, args.max_pages)
+            items, error, stats = crawl(name, fetch, args.max_pages)
         except Exception as e:  # noqa: BLE001 — one source must not sink the rest
             items, error = [], str(e)
+            stats = {"pages_fetched": 0, "duplicates": 0, "stop_reason": "error"}
         out.extend(items)  # partial results from a failed source are preserved
         if error:
             failed[name] = error
+        runs.append(make_run(
+            name,
+            "partial" if error else "ok",
+            2 if error else 0,
+            pages_fetched=stats["pages_fetched"],
+            collected=len(items),
+            stop_reason=stats["stop_reason"],
+            errors=[error] if error else [],
+            duplicates=stats["duplicates"],
+        ))
         time.sleep(DELAY)
     with open(args.output, "w", encoding="utf-8") as f:
         for i in out:
             f.write(json.dumps(i, ensure_ascii=False) + "\n")
     print(f"[ir-search] saved: {args.output} ({len(out)} items)", file=sys.stderr)
+    manifest_path = update_manifest(args.output, runs)
+    print(f"[ir-search] manifest: {manifest_path}", file=sys.stderr)
     if failed:
         detail = "; ".join(f"{k}: {v}" for k, v in failed.items())
         print(f"FAILED sources: {detail}", file=sys.stderr)

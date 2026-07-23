@@ -2,11 +2,15 @@ __pycache__/
 *.pyc
 .DS_Store
 *.jsonl
+!tests/fixtures/*.jsonl
+!evals/fixtures/**/*.jsonl
+run_manifest.json
 details/
 output/
-evals/
 *-workspace/
 
 .playwright-mcp/
 ir-search-profile.md
 scratch/
+
+.pytest_cache/
