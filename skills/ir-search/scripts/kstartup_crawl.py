@@ -100,6 +100,9 @@ def follow_redirects(do_request, url, allowed_domains=None):
                 raise RuntimeError(f"redirect to non-source url blocked: {nxt[:80]}")
             current = nxt
             continue
+        if status in (401, 403):
+            # 목록·상세 어디서든 차단 신호는 exit 3(수동 전환)로 통일 — partial 강등 금지
+            raise attach_download.ManualEscalation(f"HTTP {status} — 차단 신호")
         return status, text
     raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
 
@@ -151,6 +154,8 @@ def make_fetcher():
             except urllib.error.HTTPError as e:
                 if e.code in REDIRECT_STATUSES:
                     return e.code, "", e.headers.get("Location")
+                if e.code in (401, 403):
+                    return e.code, "", None  # 차단 상태 반환 → ManualEscalation 통일
                 raise
 
         backend = "urllib"
@@ -232,6 +237,15 @@ def cmd_list(args):
     while page <= args.max_pages:
         try:
             status, html = fetch(f"{BASE}?page={page}&schStr=&pbancEndYn=N")
+        except attach_download.ManualEscalation as e:
+            # 목록 401/403 차단 — partial(2)이 아니라 수동 전환(3). 우회 안내(curl_cffi)
+            # 대신 차단 신호임을 명확히 한다(Codex ir #4).
+            print(f"MANUAL [ir-search] page {page}: {e} — 우회하지 않고 수동 확인",
+                  file=sys.stderr)
+            update_manifest(args.output, [make_run(
+                "kstartup", "manual", 3, pages_fetched=pages_done,
+                collected=len(seen), stop_reason="blocked", errors=[str(e)])])
+            sys.exit(3)
         except Exception as e:  # noqa: BLE001 — fail closed, keep partial data
             code = getattr(e, "code", None)  # urllib raises HTTPError (has .code)
             if code is not None:
@@ -253,6 +267,16 @@ def cmd_list(args):
             partial = True
             stop_reason = f"http-{status}"
             break
+        if attach_download.looks_blocked(html):
+            # 200 위장 CAPTCHA/접근거부 목록 — parse-failure(partial)로 오인하지 않고
+            # 수동 전환(exit 3). 우회하지 않는다(Codex ir #1 후속).
+            print(f"MANUAL [ir-search] page {page}: 200 위장 차단 감지 — 수동 확인",
+                  file=sys.stderr)
+            update_manifest(args.output, [make_run(
+                "kstartup", "manual", 3, pages_fetched=pages_done,
+                collected=len(seen), stop_reason="blocked",
+                errors=["200 위장 차단(CAPTCHA/접근거부)"])])
+            sys.exit(3)
         # A 200 response was received → the page WAS fetched; count it now,
         # before parsing, so a parse-failure page still shows up in coverage.
         pages_done = page
@@ -460,9 +484,21 @@ def cmd_detail(args):
             continue
         try:
             status, html = fetch(DETAIL_URL.format(sn=sn))
+            if status in (401, 403):
+                # 1차 페이지 차단 신호 — 우회 금지·수동 전환(exit 3), partial 강등 금지
+                results.append((sn, f"FAIL MANUAL HTTP {status} — 차단 신호"))
+                print(f"MANUAL [ir-search] {sn}: HTTP {status} 차단 — 수동 확인",
+                      file=sys.stderr)
+                continue
             if status != 200:
                 results.append((sn, f"FAIL HTTP {status}"))
                 print(f"[ir-search] {sn}: HTTP {status}", file=sys.stderr)
+                continue
+            if attach_download.looks_blocked(html):
+                # 200 위장 CAPTCHA/접근거부 — 정상 본문 아님, 해시/병합 금지(exit 3)
+                results.append((sn, "FAIL MANUAL 200 위장 차단(CAPTCHA/접근거부)"))
+                print(f"MANUAL [ir-search] {sn}: 200 위장 차단 감지 — 수동 확인",
+                      file=sys.stderr)
                 continue
             path = os.path.join(args.output, f"{sn}.txt")
             if download_dir or merge_into:
@@ -490,6 +526,17 @@ def cmd_detail(args):
                                 f["download_status"] = "failed"
                                 f["download_reason"] = f"manual: {e}"
                         complete = False
+                    except Exception as e:  # noqa: BLE001
+                        # subdir_symlink_blocked 등 비-Manual 예외도 바깥 except로 새면
+                        # merge를 건너뛰어 과거 v3/complete:true가 잔존한다(Codex ir #2).
+                        # v2/incomplete를 반드시 병합하고 partial(exit 2).
+                        for f in attachments:
+                            if "download_status" not in f:
+                                f["download_status"] = "failed"
+                                f["download_reason"] = f"error: {e}"
+                        complete = False
+                        print(f"WARNING [ir-search] {sn}: 첨부 처리 오류 — "
+                              f"v2/incomplete 병합 후 partial: {e}", file=sys.stderr)
                     else:
                         complete = all(f.get("download_status") == "ok"
                                        for f in attachments)
