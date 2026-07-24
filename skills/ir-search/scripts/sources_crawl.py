@@ -352,7 +352,7 @@ SOURCE_DOMAINS = {
 }
 
 
-def crawl(source, fetch, max_pages):
+def crawl(source, fetch, max_pages, smoke=False):
     """Crawl one source. Returns (items, error, stats).
 
     error is None on full success; otherwise a short reason string. Items
@@ -404,10 +404,12 @@ def crawl(source, fetch, max_pages):
         time.sleep(DELAY)
     if stop_reason is None:
         stop_reason = "page-cap"
-        if no_new_streak == 0:
+        if no_new_streak == 0 and not smoke:
             # cap reached while the last page still had new items — more content
             # likely remains. Per the SKILL contract, page-cap == partial (exit 2);
             # intentional recent-mode runs must record this in coverage.
+            # --smoke(첫 페이지만 확인하는 저부하 CI)에서는 page-cap coverage 검증만
+            # 완화한다 — page-1 파싱 0건·네트워크/HTTP 실패는 그대로 실패(canary).
             error = f"page cap reached at p{max_pages} — collection may be INCOMPLETE"
     print(f"[ir-search] {source}: stop reason: {stop_reason}"
           + (f" ({error})" if error else ""), file=sys.stderr)
@@ -1011,6 +1013,12 @@ def main():
         help="page cap per source (bizinfo lists many announcements — "
         "recent pages usually suffice)",
     )
+    p_list.add_argument(
+        "--smoke",
+        action="store_true",
+        help="저부하 CI 스모크: page-cap coverage 검증만 완화(page-1 파싱 0건·"
+        "네트워크 실패는 그대로 실패). --max-pages 1 과 함께 첫 페이지 계약만 확인",
+    )
 
     p_det = sub.add_parser("detail", help="save detail-page text for given URLs")
     p_det.add_argument("urls", nargs="+", help="announcement detail URLs")
@@ -1052,7 +1060,7 @@ def main():
                 )
             backend_shown = True
         try:
-            items, error, stats = crawl(name, fetch, args.max_pages)
+            items, error, stats = crawl(name, fetch, args.max_pages, smoke=args.smoke)
         except Exception as e:  # noqa: BLE001 — one source must not sink the rest
             items, error = [], str(e)
             stats = {"pages_fetched": 0, "duplicates": 0, "stop_reason": "error"}

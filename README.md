@@ -2,6 +2,8 @@
 
 # ir-search
 
+[![smoke](https://github.com/djfksjd/ir-search/actions/workflows/smoke.yml/badge.svg)](https://github.com/djfksjd/ir-search/actions/workflows/smoke.yml)
+
 > ⚠️ **한국(대한민국) 정부·공공기관 지원사업 전용**입니다. 다른 국가의 지원 프로그램은 다루지 않습니다.
 
 한국 정부·공공기관 **지원사업 전수조사** 스킬 — Claude Code·Codex·agy(Antigravity CLI)·Cursor·Gemini CLI·Grok Build(x.ai)에서 쓸 수 있는 플러그인/스킬.

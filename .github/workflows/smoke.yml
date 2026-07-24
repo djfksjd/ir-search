@@ -1,0 +1,48 @@
+# ir-search first-page smoke canary
+#
+# 소스 사이트(K-Startup·기업마당·NIPA·KOCCA·SMTECH)의 API/HTML 계약이
+# 조용히 깨지는 걸 조기 감지한다. 각 크롤러를 --max-pages 1 --smoke
+# (첫 페이지만, coverage 검증만 완화)로 실행하는 저부하 스모크 —
+# 전수 크롤 금지(대상 사이트 부담), 요청 간 딜레이는 스크립트 기본을 그대로 쓴다.
+# --smoke 는 page-cap·min_expected coverage 검증만 완화한다:
+# 첫 페이지 0건 파싱·네트워크/HTTP 실패는 그대로 job 실패 → 그게 곧 알림이다.
+name: smoke
+
+on:
+  schedule:
+    - cron: "0 3 * * 1,4" # 월·목 03:00 UTC (KST 12:00) 주 2회
+  workflow_dispatch:
+  push:
+
+jobs:
+  pytest:
+    # fixture 기반 단위 테스트 — 네트워크 없음, push에도 돈다 (tests/ 전체)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # 크롤러는 표준 라이브러리만 쓴다 — 테스트 실행에 pytest만 설치
+      - run: python -m pip install pytest
+      - run: python -m pytest tests/ -q
+
+  smoke:
+    # 라이브 첫 페이지 확인 — 스케줄/수동 실행만 (push마다 외부 사이트를 치지 않는다)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SCRIPTS: skills/ir-search/scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: kstartup list first page
+        run: python3 $SCRIPTS/kstartup_crawl.py list -o /tmp/kstartup.jsonl --max-pages 1 --smoke
+
+      - name: sources list first page (all sources)
+        if: ${{ !cancelled() }}
+        run: python3 $SCRIPTS/sources_crawl.py list all -o /tmp/sources.jsonl --max-pages 1 --smoke
