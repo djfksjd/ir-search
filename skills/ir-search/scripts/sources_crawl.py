@@ -117,6 +117,10 @@ def follow_redirects(do_request, url, data=None, allowed_domains=None,
                 body = None  # redirected form submits are re-issued as GET
             current = nxt
             continue
+        if status in (401, 403):
+            # 1차 페이지·목록·상세 어디서든 차단 신호는 exit 3(수동 전환)로 통일한다 —
+            # partial(exit 2)로 강등하지 않는다(Codex ir #4, 양 백엔드 공통).
+            raise attach_download.ManualEscalation(f"HTTP {status} — 차단 신호")
         return status, text
     raise RuntimeError(f"redirect chain exceeded {MAX_REDIRECTS} hops")
 
@@ -163,6 +167,11 @@ def make_fetcher(allowed_domains=None, robots_disallowed=()):
             except urllib.error.HTTPError as e:
                 if e.code in REDIRECT_STATUSES:
                     return e.code, "", e.headers.get("Location")
+                if e.code in (401, 403):
+                    # curl_cffi 백엔드처럼 상태를 반환해 follow_redirects가 차단
+                    # 신호(ManualEscalation)로 통일 처리하게 한다(Codex ir #4:
+                    # urllib은 raise해서 exit 3 경로를 우회했다).
+                    return e.code, "", None
                 raise
 
         backend = "urllib"
@@ -176,6 +185,11 @@ def make_fetcher(allowed_domains=None, robots_disallowed=()):
 
 def clean(s):
     return re.sub(r"\s+", " ", htmllib.unescape(s or "")).strip()
+
+
+def looks_blocked(html):
+    """200 위장 소프트 차단(CAPTCHA·접근거부) 감지 — 공용 구현 위임."""
+    return attach_download.looks_blocked(html)
 
 
 def norm_date(s):
@@ -344,11 +358,14 @@ SOURCES = {
 
 # Per-source redirect allowlist: a bizinfo list crawl must not be redirected
 # even to another *permitted* source's host — each source gets only its own.
+# exact-host('=' 접두)로 좁힌다: 서브도메인 와일드카드는 크롤이 kocca.kr →
+# pms.kocca.kr(별개 시스템·계약 미확정) 등 다른 서브도메인으로 유도되는 것을
+# 허용했다(Codex ir #3). 실제 크롤은 www. 호스트만 쓰므로 www.와 bare만 허용한다.
 SOURCE_DOMAINS = {
-    "bizinfo": ("bizinfo.go.kr",),
-    "nipa": ("nipa.kr",),
-    "kocca": ("kocca.kr",),
-    "smtech": ("smtech.go.kr",),
+    "bizinfo": ("=www.bizinfo.go.kr", "=bizinfo.go.kr"),
+    "nipa": ("=www.nipa.kr", "=nipa.kr"),
+    "kocca": ("=www.kocca.kr", "=kocca.kr"),
+    "smtech": ("=www.smtech.go.kr", "=smtech.go.kr"),
 }
 
 
@@ -370,6 +387,8 @@ def crawl(source, fetch, max_pages, smoke=False):
     for page in range(1, max_pages + 1):
         try:
             items, has_more = pager(fetch, page)
+        except attach_download.ManualEscalation:
+            raise  # 목록 크롤 중 401/403 차단 — partial(2)로 삼키지 않고 수동 전환(3)
         except Exception as e:  # noqa: BLE001 — keep partial data, fail closed
             code = getattr(e, "code", None)  # urllib HTTPError
             error = f"page {page}: " + (f"HTTP {code}" if code is not None else str(e))
@@ -876,9 +895,23 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
             continue
         try:
             status, h = fetch(url)
+            if status in (401, 403):
+                # 1차 페이지의 401/403은 차단 신호 — 우회하지 않고 수동 전환(exit 3).
+                # 일반 FAIL(exit 2)로 강등하면 partial로 오인된다(Codex ir #4).
+                results.append((url, f"FAIL MANUAL HTTP {status} — 차단 신호"))
+                print(f"MANUAL [ir-search] {url[:60]}: HTTP {status} 차단 — "
+                      "우회하지 않고 수동 확인", file=sys.stderr)
+                continue
             if status != 200:
                 results.append((url, f"FAIL HTTP {status}"))
                 print(f"[ir-search] {url[:60]}: HTTP {status}", file=sys.stderr)
+                continue
+            if looks_blocked(h):
+                # 200으로 위장한 CAPTCHA/접근거부 — 정상 본문이 아니므로 해시/병합
+                # 금지, 수동 전환(exit 3). 우회하지 않는다.
+                results.append((url, "FAIL MANUAL 200 위장 차단(CAPTCHA/접근거부)"))
+                print(f"MANUAL [ir-search] {url[:60]}: 200 위장 차단 감지 — "
+                      "우회하지 않고 수동 확인", file=sys.stderr)
                 continue
             digest8 = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
             name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
@@ -926,6 +959,18 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                                 f["download_status"] = "failed"
                                 f["download_reason"] = f"manual: {e}"
                         complete = False
+                    except Exception as e:  # noqa: BLE001
+                        # subdir_symlink_blocked 등 process_attachments의 비-Manual
+                        # 예외도 바깥 except로 새면 merge를 건너뛰어 과거 v3/complete:true
+                        # 레코드가 잔존, 본문 변경이 diff에서 숨는다(Codex ir #2).
+                        # 반드시 v2 본문 + attachments_complete:false로 병합하고 partial.
+                        for f in attachments:
+                            if "download_status" not in f:
+                                f["download_status"] = "failed"
+                                f["download_reason"] = f"error: {e}"
+                        complete = False
+                        print(f"WARNING [ir-search] 첨부 처리 오류 — v2/incomplete 병합 "
+                              f"후 partial: {e}", file=sys.stderr)
                     else:
                         complete = all(f.get("download_status") == "ok"
                                        for f in attachments)
@@ -1050,11 +1095,20 @@ def main():
     names = list(SOURCES) if args.source == "all" else [args.source]
     out = []
     failed = {}  # source -> reason
+    blocked = []  # 401/403 차단 신호를 받은 소스 — exit 3
     runs = []  # run_manifest.json entries, one per source
     backend_shown = False
     for name in names:
         # Per-source fetcher: redirects may only stay on that source's host.
-        fetch, backend = make_fetcher(SOURCE_DOMAINS[name])
+        raw_fetch, backend = make_fetcher(SOURCE_DOMAINS[name])
+
+        def fetch(url, data=None, _f=raw_fetch):
+            # 목록/상세 200 위장 차단(CAPTCHA)도 수동 전환(exit 3)으로 통일 —
+            # parse-failure(partial)로 오인해 blind 재시도하지 않는다(Codex ir #1 후속).
+            status, text = _f(url, data)
+            if status == 200 and looks_blocked(text):
+                raise attach_download.ManualEscalation("200 위장 차단(CAPTCHA/접근거부)")
+            return status, text
         if not backend_shown:
             print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
             if backend == "urllib":
@@ -1065,16 +1119,22 @@ def main():
             backend_shown = True
         try:
             items, error, stats = crawl(name, fetch, args.max_pages, smoke=args.smoke)
+        except attach_download.ManualEscalation as e:
+            # 차단 신호 — 우회하지 않고 수동 전환(exit 3). partial로 강등하지 않는다.
+            items, error = [], f"MANUAL {e}"
+            stats = {"pages_fetched": 0, "duplicates": 0, "stop_reason": "blocked"}
+            blocked.append(name)
         except Exception as e:  # noqa: BLE001 — one source must not sink the rest
             items, error = [], str(e)
             stats = {"pages_fetched": 0, "duplicates": 0, "stop_reason": "error"}
         out.extend(items)  # partial results from a failed source are preserved
         if error:
             failed[name] = error
+        is_blocked = name in blocked
         runs.append(make_run(
             name,
-            "partial" if error else "ok",
-            2 if error else 0,
+            "manual" if is_blocked else ("partial" if error else "ok"),
+            3 if is_blocked else (2 if error else 0),
             pages_fetched=stats["pages_fetched"],
             collected=len(items),
             stop_reason=stats["stop_reason"],
@@ -1091,6 +1151,11 @@ def main():
     if failed:
         detail = "; ".join(f"{k}: {v}" for k, v in failed.items())
         print(f"FAILED sources: {detail}", file=sys.stderr)
+        if blocked:
+            # 차단 신호가 하나라도 있으면 partial이 아니라 수동 전환(exit 3)
+            print(f"MANUAL [ir-search] 차단 신호 소스: {', '.join(blocked)} — "
+                  "우회하지 않고 수동 확인으로 전환", file=sys.stderr)
+            sys.exit(3)
         print(
             "WARNING: coverage INCOMPLETE — treat this run as partial (exit 2)",
             file=sys.stderr,

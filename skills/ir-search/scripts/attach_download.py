@@ -136,6 +136,40 @@ def safe_filename(name, idx):
     return f"{idx:02d}_{base[:120]}" if base else f"{idx:02d}_attach"
 
 
+# 첨부로 위장한 HTML 오류/차단 페이지 감지 — HTML 첨부(.html)가 아닌데 본문이
+# HTML 태그로 시작하면 200 위장 소프트 차단(세션만료·CAPTCHA)으로 본다(Codex ir #1).
+# 파일명이 URL 기반(getFile.do 등)이라 확장자가 없을 수 있으므로 확장자 화이트리스트
+# 방식: .html/.htm 첨부만 예외로 허용하고 나머지는 HTML 바이트를 거부한다.
+# HTTP 200으로 위장한 소프트 차단(CAPTCHA·접근거부) 마커 — 상세 페이지 HTML을
+# 정상 공고로 해시/병합하면 잘못된 UNCHANGED가 된다(Codex ir #1). sources·kstartup 공용.
+_BLOCK_MARKERS = (
+    "captcha", "recaptcha", "verify you are human", "are you a robot",
+    "access denied", "forbidden", "접근이 제한", "접근이 차단", "비정상적인 접근",
+    "자동입력 방지", "로봇이 아닙", "일시적으로 차단",
+)
+
+
+def looks_blocked(html):
+    """앞부분에 차단/캡차 마커가 있으면 True — 200 위장 소프트 차단 감지."""
+    low = (html or "")[:4000].lower()
+    return any(m in low for m in _BLOCK_MARKERS)
+
+
+def _looks_like_html_error(first_bytes, content_type, filename):
+    """마크업/HTML 확장자 첨부가 아닌데 본문이 `<`(태그)로 시작하면 True.
+    PDF(%PDF-)·OLE(D0CF)·ZIP/HWPX(PK)·이미지 등 실제 문서 바이너리는 어느 것도
+    '<'로 시작하지 않으므로, `<`로 시작하면 HTML/XML 오류·차단 페이지다. 이렇게
+    하면 `<!doctype>`뿐 아니라 `<body>`·`<!--`·`<html`·BOM 선행까지 모두 잡힌다
+    (Codex ir #1 후속). Content-Type은 서버가 자주 오기재하므로 근거로 쓰지 않는다."""
+    name = (filename or "").lower()
+    if name.endswith((".html", ".htm", ".xhtml", ".xml", ".svg", ".xsl")):
+        return False  # 마크업 첨부 자체는 정상
+    head = first_bytes[:512]
+    if head[:3] == b"\xef\xbb\xbf":  # UTF-8 BOM 선행 제거
+        head = head[3:]
+    return head.lstrip()[:1] == b"<"
+
+
 _MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
 _MAX_UNESCAPE = 5  # 반복 HTML 엔티티 디코딩 상한 (&amp;amp;amp; 다중 인코딩 커버)
 
@@ -171,9 +205,17 @@ def robots_allowed(url, disallowed_prefixes):
     candidates = []
     cur = target
     for _ in range(_MAX_UNQUOTE + 1):
+        # 잘못된 percent 인코딩(%ZZ, 뒤 2자리 non-hex, % 단독)은 unquote가 예외 없이
+        # 원문 유지 → robots 우회 소지. **매 디코드 단계**에서 검사한다 — %25ZZ가
+        # 1회 디코드되면 %ZZ가 되므로 루프 밖 1회 검사로는 못 잡는다(Codex ir #7 후속).
+        if re.search(r"%(?![0-9A-Fa-f]{2})", cur):
+            return False
         candidates.append(cur)
         try:
-            nxt = urllib.parse.unquote(cur)
+            # errors="strict": 기본값 "replace"는 %FF·%ZZ·절단 %E0%A4를 대체문자로
+            # 삼켜 '디코딩 불가 → 거부' 경로를 죽인다(Codex ir #7). strict면 잘못된
+            # 바이트가 예외 → fail-closed. 정상 UTF-8 인코딩 경로는 영향 없음.
+            nxt = urllib.parse.unquote(cur, errors="strict")
         except (ValueError, UnicodeDecodeError):
             return False  # 디코딩 불가 — fail-closed
         if nxt == cur:
@@ -240,6 +282,22 @@ def filename_from_content_disposition(cd_header):
     return _unescape_fixed_point(m.group(1)).split(";", 1)[0].strip() or None
 
 
+def _has_mojibake_run(raw):
+    """연속된 high-byte(0x80-0xFF)가 2개 이상이면 True — latin-1로 잘못 흘러온
+    멀티바이트 인코딩의 서명이다. UTF-8·CP949 한글은 문자당 2~3바이트라 반드시
+    연속 high-byte 런을 남긴다. 반대로 0xB7(·) 하나처럼 **고립된** high-byte는
+    정상 문자이므로(예: 'AI·DX.pdf') 재해석하면 안 된다."""
+    run = 0
+    for b in raw:
+        if b >= 0x80:
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
+
+
 def recover_filename(cd_name):
     """추출된 Content-Disposition 파일명 값의 인코딩을 복구한다.
 
@@ -249,15 +307,13 @@ def recover_filename(cd_name):
       - SMTECH: 일부 첨부는 **CP949(EUC-KR)** 바이트 + `&amp;` 엔티티 포함
         (2026-07-24) → `Ú 2026³â Áß¼Ò_â¾_ R_amp`처럼 깨졌다.
 
-    규칙(단순·무회귀) — **UTF-8 우선, 실패 시에만 CP949**:
+    규칙 — **모지바케 서명이 있을 때만 재디코드, UTF-8 우선 CP949 폴백**:
       1. cd_name을 latin-1 바이트로 되돌린다. `.encode("latin-1")`이 실패하면
          (이미 정상 한글 등) 재해석하지 않고 원본을 유지한다.
-      2. latin-1 raw를 UTF-8로 디코드해 **성공하면 한글 유무와 무관하게 무조건
-         채택**한다. 한글 개수·유무 휴리스틱은 정상 UTF-8(`AI·DX.pdf`,
-         `기술·개발.pdf`)을 CP949로 재해석해 훼손하는 회귀를 낳아 폐기했다.
-      3. CP949(EUC-KR) 폴백은 **UTF-8 디코드가 UnicodeDecodeError로 실패할
-         때만** 시도한다 — SMTECH(cp949-as-latin1)는 utf-8이 raise → cp949로
-         복구되고, bizinfo류(utf-8-as-latin1)는 utf-8 성공 → cp949 미도달.
+      2. **연속 high-byte 런(_has_mojibake_run)이 있을 때만** 재디코드한다. 이게
+         없으면(예: 'AI·DX.pdf'의 고립된 0xB7) 정상 이름이므로 그대로 둔다 —
+         cp949가 0xB7을 lead byte로 오인해 'AI텱X.pdf'로 훼손하던 회귀 차단(Codex ir #6).
+      3. 런이 있으면 UTF-8 우선(bizinfo류) → 실패 시 CP949(SMTECH류) 폴백.
       4. `html.unescape`를 고정점까지 반복해 잔여 엔티티를 디코드하고,
          %-인코딩은 unquote한다(헤더 파서가 이미 처리했어도 심층 방어)."""
     if not cd_name:
@@ -266,12 +322,12 @@ def recover_filename(cd_name):
         raw = cd_name.encode("latin-1")
     except UnicodeEncodeError:
         raw = None  # 이미 non-latin1(정상 한글 등) — 바이트 재해석 금지
-    if raw is not None:
+    if raw is not None and _has_mojibake_run(raw):
         try:
-            cd_name = raw.decode("utf-8")  # utf-8 성공 → 무조건 채택
+            cd_name = raw.decode("utf-8")  # utf-8 성공 → 채택(bizinfo류)
         except UnicodeDecodeError:
             try:
-                cd_name = raw.decode("cp949")  # utf-8 실패 시에만 CP949 폴백
+                cd_name = raw.decode("cp949")  # utf-8 실패 시 CP949 폴백(SMTECH류)
             except UnicodeDecodeError:
                 pass  # 둘 다 실패 — 원본 유지
     cd_name = _unescape_fixed_point(cd_name)
@@ -290,6 +346,7 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts,
         raise RuntimeError(f"첨부 URL host/scheme 불허: {url[:80]}")
     dirpath = str(pathlib.Path(dirpath).resolve())
     path = None
+    tmp = None
     try:
         with open_validated(url, allowed_hosts, timeout=60,
                             robots_disallowed=robots_disallowed) as r:
@@ -306,31 +363,52 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts,
                 r.headers.get("Content-Disposition"))
             if raw_name is None:  # Content-Type name= 등 다른 경로는 email 파서 폴백
                 raw_name = r.headers.get_filename()
+            ctype = (r.headers.get("Content-Type") or "").lower()
             cd_name = recover_filename(raw_name)
-            path = (pathlib.Path(dirpath) /
-                    safe_filename(cd_name or fallback_name, idx)).resolve()
+            fname = safe_filename(cd_name or fallback_name, idx)
+            path = (pathlib.Path(dirpath) / fname).resolve()
             if os.path.commonpath([str(path), dirpath]) != dirpath \
                     or path.is_symlink():
                 raise RuntimeError("path_escape_blocked")
+            # O_CREAT|O_EXCL|O_NOFOLLOW: 사전 배치된 파일/symlink를 따라가거나
+            # 기존 정상 파일을 truncate하지 않는다(Codex ir #5, "wb" 교체). tmp에
+            # 받고 성공 시에만 최종 이름으로 교체 — 실패 시 잔여물 없음.
+            tmp_path = path.with_name(f".part-{os.getpid()}-{idx}-{path.name}"[:200])
+            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(tmp_path,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow, 0o644)
+            except FileExistsError:
+                raise RuntimeError(f"tmp_preexists_blocked: {tmp_path.name}") from None
+            tmp = tmp_path
             read = 0
-            with open(path, "wb") as fh:
+            first = b""
+            with os.fdopen(fd, "wb") as fh:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
                         break
+                    if not first:
+                        first = chunk[:512]
                     read += len(chunk)
                     if read > MAX_ATTACH_BYTES:
                         raise RuntimeError(
                             f"첨부가 {MAX_ATTACH_BYTES // (1 << 20)}MB 상한 초과")
                     fh.write(chunk)
+            # 200으로 위장한 HTML 오류/CAPTCHA 페이지를 바이너리 첨부로 저장하는 것을
+            # 막는다(Codex ir #1) — 첨부 확장자가 문서인데 본문이 HTML이면 실패.
+            if _looks_like_html_error(first, ctype, path.name):
+                raise RuntimeError("soft_block_html — 첨부가 아닌 HTML 오류/차단 페이지")
+            os.replace(tmp, path)
+            tmp = None
             return path
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise ManualEscalation(f"첨부 다운로드 HTTP {e.code}") from e
         raise
     except (RuntimeError, OSError):
-        if path is not None:
-            path.unlink(missing_ok=True)  # 부분 파일 잔존 방지
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)  # 부분 tmp 잔존 방지
         raise
 
 
