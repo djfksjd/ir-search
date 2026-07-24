@@ -49,6 +49,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 from run_manifest import make_run, update_manifest  # noqa: E402
 import attach_download  # noqa: E402 — 첨부 다운로드 공용 모듈 (hash v2/v3)
+import kstartup_api  # noqa: E402 — 공식 API(data.go.kr) 우선 경로, 키 없으면 크롤 폴백
 
 BASE ="https://www.k-startup.go.kr/web/contents/bizpbanc-ongoing.do"
 DETAIL_URL = BASE + "?schM=view&pbancSn={sn}"
@@ -218,6 +219,72 @@ def parse_list(html):
 
 
 def cmd_list(args):
+    # ---- API 우선 (data.go.kr 키가 있으면) --------------------------------
+    # 키가 있으면 공식 오픈API로 모집중 공고를 받는다. 건강한 수집량이면 그대로
+    # 사용(exit 0/2), API가 실패하거나 커버리지가 부족하면 아래 크롤로 폴백한다.
+    # 크롤이 전수 커버리지의 보증 경로이고, API는 최적화다.
+    key = kstartup_api.load_key()
+    if key:
+        smoke = getattr(args, "smoke", False)
+        min_expected = 0 if smoke else args.min_expected
+        try:
+            records, total, pages, proven = kstartup_api.list_announcements(
+                key, min_expected=max(1, min_expected),
+                max_pages=getattr(args, "max_pages", kstartup_api.MAX_PAGES),
+            )
+        except attach_download.ManualEscalation as e:
+            # 401/403·200 위장 차단 신호 — 우회하지 않고 수동 전환(exit 3). 크롤 폴백 금지.
+            print(
+                f"MANUAL [ir-search] K-Startup API: {e} — 우회하지 않고 수동 확인",
+                file=sys.stderr,
+            )
+            update_manifest(args.output, [make_run(
+                "kstartup", "manual", 3, pages_fetched=0, collected=0,
+                stop_reason="blocked", errors=[str(e)])])
+            sys.exit(3)
+        except kstartup_api.ApiError as e:
+            # 키가 잘못됐거나(등록/쿼터)·커버리지 미증명·전송오류 → 크롤로 폴백(키는 마스킹됨).
+            print(
+                f"[ir-search] K-Startup 공식 API 미사용 ({e}) — 공개 페이지 크롤로 폴백",
+                file=sys.stderr,
+            )
+        else:
+            seen = {}
+            for r in records:
+                seen[str(r["pbancSn"])] = r
+            with open(args.output, "w", encoding="utf-8") as f:
+                for i in seen.values():
+                    f.write(json.dumps(i, ensure_ascii=False) + "\n")
+            fail = min_expected > 0 and len(seen) < min_expected
+            # A non-proven (newest-first heuristic) stop is recent-window
+            # coverage, NOT exhaustive — honestly report it as partial/exit 2
+            # (matches the exit-code contract; the crawl is the exhaustive
+            # authority, and diff mode must not conclude GONE from a partial run).
+            window = not proven
+            partial = fail or window
+            errors = []
+            if fail:
+                errors.append(
+                    f"only {len(seen)} items via API (< {min_expected} expected)")
+            if window:
+                errors.append(
+                    "api-window: recent-window coverage via newest-first heuristic "
+                    "(not a proven exhaustive scan); the crawl is the exhaustive "
+                    "authority for late reopened announcements")
+            manifest_path = update_manifest(args.output, [make_run(
+                "kstartup", "partial" if partial else "ok", 2 if partial else 0,
+                pages_fetched=pages, collected=len(seen), reported_total=total,
+                stop_reason="api" if proven else "api-window", errors=errors)])
+            print(
+                f"[ir-search] K-Startup via official API: {len(seen)} announcements "
+                f"(dataset 15125364"
+                f"{'' if proven else ', recent-window — exit 2 partial, crawl is exhaustive'})"
+                f" — {args.output}",
+                file=sys.stderr,
+            )
+            print(f"[ir-search] manifest: {manifest_path}", file=sys.stderr)
+            sys.exit(2 if partial else 0)
+
     fetch, backend = make_fetcher()
     print(f"[ir-search] fetch backend: {backend}", file=sys.stderr)
     if backend == "urllib":

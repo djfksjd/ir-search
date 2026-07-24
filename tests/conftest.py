@@ -35,6 +35,16 @@ def kstartup_crawl():
 
 
 @pytest.fixture(scope="session")
+def kstartup_api():
+    # Return the SAME module instance kstartup_crawl imports (real import, not
+    # load_script) so autouse/monkeypatch on load_key reaches the crawler.
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    import kstartup_api as mod
+    return mod
+
+
+@pytest.fixture(scope="session")
 def diff_surveys():
     return load_script("diff_surveys")
 
@@ -66,6 +76,30 @@ def no_sleep(monkeypatch):
     """Politeness delays are pointless against local fixtures."""
     import time
     monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_key_loader: opt out of the hermetic no-key default to test load_key itself",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_no_data_go_kr_key(monkeypatch, request):
+    """Default: cmd_list sees NO data.go.kr key, so the existing crawl-path
+    tests are unaffected by a real `.env` on the developer machine. Tests that
+    exercise the real key loader opt out with @pytest.mark.real_key_loader.
+    """
+    if request.node.get_closest_marker("real_key_loader"):
+        return
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import kstartup_api  # same module object kstartup_crawl imports
+    except Exception:  # noqa: BLE001 — module may not be importable in some runs
+        return
+    monkeypatch.setattr(kstartup_api, "load_key", lambda: None)
 
 
 @pytest.fixture(autouse=True)

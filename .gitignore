@@ -14,3 +14,7 @@ ir-search-profile.md
 scratch/
 
 .pytest_cache/
+
+# data.go.kr service key — NEVER commit (K-Startup official API path)
+.env
+data_go_kr_key
