@@ -137,6 +137,7 @@ def safe_filename(name, idx):
 
 
 _MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
+_MAX_UNESCAPE = 5  # 반복 HTML 엔티티 디코딩 상한 (&amp;amp;amp; 다중 인코딩 커버)
 
 
 def _robots_path_match(path, pattern):
@@ -210,16 +211,19 @@ def recover_filename(cd_name):
         엔티티 포함 (2026-07-24). latin-1→utf-8만으론 복구 불가 →
         `Ú 2026³â Áß¼Ò_â¾_ R_amp`처럼 깨졌다.
 
-    복구 전략(정상 이름 훼손 방지):
-      1. cd_name을 latin-1 바이트로 되돌린 뒤 UTF-8 → CP949 순으로 디코드해
-         후보를 만든다. `.encode("latin-1")`이 실패하면(이미 정상 한글 등)
-         재해석하지 않고 원본을 유지한다.
-      2. **원본(모지바케)보다 유효한 한글 음절이 더 많은 후보만 채택**한다 —
-         이미 올바른 UTF-8 한글 이름을 CP949로 오해석해 깨뜨리지 않는다.
-         UTF-8 후보를 먼저 평가하므로 동점(예: 순수 ASCII)에서는 원본/UTF-8이
-         이긴다.
-      3. `html.unescape`로 `&amp;`→`&` 등 HTML 엔티티를 디코드하고,
-         %-인코딩은 unquote한다(현행 유지)."""
+    복구 전략(정상 이름 훼손 방지) — **UTF-8 우선 규칙**:
+      1. cd_name을 latin-1 바이트로 되돌린다. `.encode("latin-1")`이 실패하면
+         (이미 정상 한글 등) 재해석하지 않고 원본을 유지한다.
+      2. latin-1 raw를 UTF-8로 디코드한다. 성공하고 **결과에 한글(가-힣)이
+         있으면 즉시 UTF-8을 채택**한다(CP949 후보와 비교하지 않는다). 한글
+         개수 비교는 정상 UTF-8(`기술·개발.pdf`)을 CP949로 재해석한 후보
+         (`湲곗닠쨌媛쒕컻.pdf`, 6>4)가 이겨 훼손하는 회귀를 낳으므로 폐기했다.
+      3. CP949(EUC-KR) 폴백은 **UTF-8 디코드가 실패하거나(SMTECH 실측) 결과에
+         한글이 전혀 없을 때만** 시도한다. 이렇게 하면 SMTECH(utf-8 디코드
+         자체가 실패 → cp949 폴백)는 복구되고, bizinfo/구두점 섞인 UTF-8
+         이름은 utf-8에서 확정돼 cp949에 도달하지 않는다.
+      4. `html.unescape`를 고정점까지 반복(상한 5회)해 `&amp;amp;amp;` 같은
+         다중 인코딩 엔티티까지 `&`로 디코드하고, %-인코딩은 unquote한다."""
     if not cd_name:
         return cd_name
     try:
@@ -227,17 +231,24 @@ def recover_filename(cd_name):
     except UnicodeEncodeError:
         raw = None  # 이미 non-latin1(정상 한글 등) — 바이트 재해석 금지
     if raw is not None:
-        best, best_score = cd_name, _hangul_count(cd_name)
-        for enc in ("utf-8", "cp949"):
+        utf8 = None
+        try:
+            utf8 = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        if utf8 is not None and _hangul_count(utf8) > 0:
+            cd_name = utf8  # UTF-8 우선 — 한글이 나오면 확정, CP949 미도달
+        else:
             try:
-                cand = raw.decode(enc)
+                cd_name = raw.decode("cp949")  # SMTECH 등 CP949 폴백
             except UnicodeDecodeError:
-                continue
-            score = _hangul_count(cand)
-            if score > best_score:  # 엄격한 > — 동점 시 앞선(UTF-8) 후보 우선
-                best, best_score = cand, score
-        cd_name = best
-    cd_name = html.unescape(cd_name)
+                if utf8 is not None:
+                    cd_name = utf8  # 한글 없는 UTF-8(순수 ASCII 등)이라도 유효
+    for _ in range(_MAX_UNESCAPE):  # 다중 인코딩 엔티티(&amp;amp;)까지 고정점 복구
+        unescaped = html.unescape(cd_name)
+        if unescaped == cd_name:
+            break
+        cd_name = unescaped
     if "%" in cd_name:
         cd_name = urllib.parse.unquote(cd_name)
     return cd_name

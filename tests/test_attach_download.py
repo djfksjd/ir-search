@@ -141,8 +141,11 @@ def test_recover_filename_valid_utf8_hangul_untouched(attach_download):
 
 
 def test_recover_filename_html_entity_amp_decoded(attach_download):
-    """(c) `&amp;` HTML 엔티티 → `&`로 디코드."""
+    """(c) `&amp;` HTML 엔티티 → `&`로 디코드. 다중 인코딩까지 고정점 복구."""
     assert attach_download.recover_filename("R&amp;D_지원.hwp") == "R&D_지원.hwp"
+    # Codex 게이트 #2: html.unescape 1회로는 &amp;amp;amp;가 &amp;로 남는다 —
+    # 고정점까지 반복해 다중 인코딩 엔티티도 완전 디코드
+    assert attach_download.recover_filename("R&amp;amp;amp;D.hwp") == "R&D.hwp"
     # CP949 mojibake + &amp;가 함께 온 SMTECH 실측 형태도 복구
     smtech = "2026년 R&D.hwp"
     moji = smtech.encode("cp949").decode("latin-1").replace("&", "&amp;")
@@ -154,6 +157,16 @@ def test_recover_filename_utf8_as_latin1_still_recovered(attach_download):
     original = "공고문.pdf"
     mojibake = original.encode("utf-8").decode("latin-1")
     assert attach_download.recover_filename(mojibake) == original
+
+
+def test_recover_filename_utf8_with_punctuation_not_clobbered_by_cp949(
+        attach_download):
+    """Codex 게이트 #1 회귀: 구두점(·) 섞인 UTF-8-as-latin1 이름은 UTF-8로
+    이미 정상 복구되는데, CP949 재해석 후보의 한글 음절이 더 많다고(6>4)
+    CP949를 채택해 훼손하면 안 된다 — UTF-8 우선 규칙으로 확정."""
+    for original in ("기술·개발.pdf", "AI·데이터 사업.hwp", "R&D·창업.pdf"):
+        mojibake = original.encode("utf-8").decode("latin-1")
+        assert attach_download.recover_filename(mojibake) == original
 
 
 def test_recover_filename_ascii_and_percent_unquote(attach_download):
