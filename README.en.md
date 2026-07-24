@@ -54,13 +54,20 @@ Every mentioned announcement carries its original URL; anything not stated in th
 
 | Source                                  | What it is                                        | Crawler               |
 | --------------------------------------- | ------------------------------------------------- | --------------------- |
-| [K-Startup](https://www.k-startup.go.kr) | Unified startup-support portal (default)          | `kstartup_crawl.py` |
+| [K-Startup](https://www.k-startup.go.kr) | Unified startup-support portal (default)          | `kstartup_crawl.py` (+ `kstartup_api.py`) |
 | [Bizinfo](https://www.bizinfo.go.kr)     | All-ministry/region SME support (widest coverage) | `sources_crawl.py`  |
 | [NIPA](https://www.nipa.kr)              | AI / ICT programs                                 | `sources_crawl.py`  |
 | [KOCCA](https://www.kocca.kr)            | Content-industry programs                         | `sources_crawl.py`  |
 | [SMTECH](https://www.smtech.go.kr)       | SME R&D calls                                     | `sources_crawl.py`  |
 
 More sources (NIA, IITP, IRIS, regional agencies) are catalogued in `skills/ir-search/references/sources.md`.
+
+### K-Startup official API (optional — more accurate & faster when present, crawl otherwise)
+
+`kstartup_crawl.py list` uses the official [data.go.kr](https://www.data.go.kr/data/15125364/openapi.do) K-Startup Open API (dataset 15125364) when a **data.go.kr service key** is available, and **automatically falls back to the public-page crawler when no key is present or the API fails / is blocked / returns an unexpected shape** (identical output schema and manifest). The key is read from the repo-root `.env` (`DATA_GO_KR_KEY=...`), the `DATA_GO_KR_KEY` env var, or the shared `~/.config/data_go_kr_key`, and is **never printed to logs, errors, or the command line** (`.env` is gitignored). The same key is reused by sole-search's gov24.
+
+- **Coverage honesty**: this dataset is ordered newest-registration-first, so if the API proves exhaustion via `totalCount` it records `stop_reason: api` (status `ok`, exit 0); if it stops early on the newest-first window it records `stop_reason: api-window` (status `partial`, **exit 2**). The crawl is the authority for exhaustive coverage, and diff mode does not conclude GONE from a partial (`api-window`) run.
+- **Bizinfo stays crawl** — its official API needs a separate `crtfcKey` (issued by Bizinfo, distinct from the data.go.kr key) and the crawler already provides full coverage, so no API is used there.
 
 ## Install
 
@@ -171,8 +178,11 @@ ir-search/
     └── ir-search/
         ├── SKILL.md                  # workflow (profile → collect all → review all → verify → 3-tier report)
         ├── scripts/
-        │   ├── kstartup_crawl.py     # K-Startup crawler
+        │   ├── kstartup_crawl.py     # K-Startup crawler (API-first, crawl fallback)
+        │   ├── kstartup_api.py       # K-Startup official Open API client (data.go.kr)
         │   ├── sources_crawl.py      # Bizinfo / NIPA / KOCCA / SMTECH crawler
+        │   ├── attach_download.py    # shared attachment download (robots-safe, hash)
+        │   ├── run_manifest.py       # shared run_manifest.json writer (coverage)
         │   └── diff_surveys.py       # incremental re-survey diff (new / changed / closed)
         └── references/sources.md     # source registry (verified access recipes + secondary sources)
 ```
