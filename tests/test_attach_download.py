@@ -159,12 +159,12 @@ def test_recover_filename_utf8_as_latin1_still_recovered(attach_download):
     assert attach_download.recover_filename(mojibake) == original
 
 
-def test_recover_filename_utf8_with_punctuation_not_clobbered_by_cp949(
-        attach_download):
-    """Codex 게이트 #1 회귀: 구두점(·) 섞인 UTF-8-as-latin1 이름은 UTF-8로
-    이미 정상 복구되는데, CP949 재해석 후보의 한글 음절이 더 많다고(6>4)
-    CP949를 채택해 훼손하면 안 된다 — UTF-8 우선 규칙으로 확정."""
-    for original in ("기술·개발.pdf", "AI·데이터 사업.hwp", "R&D·창업.pdf"):
+def test_recover_filename_utf8_no_hangul_not_clobbered_by_cp949(attach_download):
+    """Codex 재심사 #2 회귀: UTF-8 디코드가 성공하면 한글 유무와 무관하게
+    채택한다. `AI·DX.pdf`(한글 없는 UTF-8-as-latin1)를 '한글이 없으니 CP949'
+    규칙으로 재해석해 `AI쨌DX.pdf`로 훼손하면 안 된다."""
+    for original in ("AI·DX.pdf", "기술·개발.pdf", "R&D·창업.pdf",
+                     "café·menu.pdf"):
         mojibake = original.encode("utf-8").decode("latin-1")
         assert attach_download.recover_filename(mojibake) == original
 
@@ -174,6 +174,32 @@ def test_recover_filename_ascii_and_percent_unquote(attach_download):
     assert attach_download.recover_filename("form.pdf") == "form.pdf"
     assert attach_download.recover_filename("%EA%B3%B5%EA%B3%A0.hwp") == "공고.hwp"
     assert attach_download.recover_filename(None) is None
+
+
+# ---------------------------------------- filename_from_content_disposition
+# Codex 재심사 #1 회귀: email get_filename()은 따옴표 없는 값의 &amp; 내부
+# ';'를 파라미터 구분자로 오인해 자른다 — 원시 헤더를 직접 엔티티-aware하게
+# 파싱해 파일명 전체를 살린다.
+
+
+def test_cd_unquoted_entity_not_truncated(attach_download):
+    """따옴표 없는 `filename=...&amp;...`가 ';'로 잘리지 않는다 (SMTECH 실측)."""
+    f = attach_download.filename_from_content_disposition
+    # get_filename()이라면 '2026³â R&amp'로 잘렸을 헤더
+    hdr = "attachment; filename=2026³â R&amp;D.hwp"
+    assert f(hdr) == "2026³â R&D.hwp"  # ';D.hwp'가 살아남았다
+    # 뒤에 진짜 파라미터가 붙어도 그 경계까지만
+    assert f("attachment; filename=a&amp;b.hwp; size=10") == "a&b.hwp"
+
+
+def test_cd_quoted_and_rfc6266_and_none(attach_download):
+    """따옴표(정상), RFC 6266 filename*, 파라미터 동반, 헤더 부재 모두 처리."""
+    f = attach_download.filename_from_content_disposition
+    assert f('attachment; filename="공고문.pdf"') == "공고문.pdf"
+    assert f('attachment; filename="a.pdf"; size=1') == "a.pdf"
+    assert f("attachment; filename*=UTF-8''%EA%B3%B5%EA%B3%A0.hwp") == "공고.hwp"
+    assert f(None) is None
+    assert f("attachment") is None
 
 
 # ------------------------------------------------------- download_attachment
@@ -190,6 +216,25 @@ def test_download_ok_sha256_and_filename(attach_download, monkeypatch, tmp_path)
     # latin-1→UTF-8 모지바케 복구 + 순번 프리픽스
     assert path.name == "00_공고문.pdf"
     assert hashlib.sha256(data).hexdigest() == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_download_unquoted_cp949_entity_header_full_filename_saved(
+        attach_download, monkeypatch, tmp_path):
+    """Codex 재심사 #1 회귀(실제 다운로드 경로): 따옴표 없는 CP949+엔티티
+    Content-Disposition `filename=2026³â R&amp;D.hwp`가 email get_filename()에
+    잘려 `00_2026년 R_`로 저장되던 것을, 원시 헤더 파싱으로 파일명 전체를
+    살려 `00_2026년 R_D.hwp`로 저장한다(&·는 safe_filename이 '_'로 정제)."""
+    data = b"%HWP synthetic"
+    cd = "attachment; filename=" + (
+        "2026년 R&D.hwp".encode("cp949").decode("latin-1").replace("&", "&amp;"))
+    url = "https://www.smtech.go.kr/front/comn/AtchFileDownload.do?atchFileId=A"
+    resp = FakeResp(data, headers={"Content-Disposition": cd}, url=url)
+    monkeypatch.setattr(attach_download, "_urlopen", lambda req, timeout: resp)
+    path = attach_download.download_attachment(
+        url, tmp_path, "fb", 0, ("smtech.go.kr",))
+    assert path.read_bytes() == data
+    # ';D.hwp'가 잘리지 않고 전체가 살아남았다 (pre-fix: "00_2026년 R_")
+    assert path.name == "00_2026년 R_D.hwp"
 
 
 def test_download_content_length_over_cap_rejected(attach_download, monkeypatch, tmp_path):
