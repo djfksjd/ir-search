@@ -309,7 +309,8 @@ def cmd_list(args):
             file=sys.stderr,
         )
         fail = True
-    if stop_reason == "page-cap" and last_page_had_new:
+    smoke = getattr(args, "smoke", False)
+    if stop_reason == "page-cap" and last_page_had_new and not smoke:
         print(
             "WARNING: page cap reached — collection may be INCOMPLETE "
             f"(--max-pages {args.max_pages}, last page still had new items)",
@@ -319,7 +320,10 @@ def cmd_list(args):
             f"page cap reached at p{args.max_pages} — collection may be INCOMPLETE"
         )
         fail = True
-    min_expected = args.min_expected
+    # --smoke: 첫 페이지만 확인하는 저부하 CI 스모크. coverage(page-cap·min_expected)
+    # 검증만 완화한다. page-1 파싱 0건·네트워크/HTTP 실패는 그대로 실패(exit 2) —
+    # 이것이 계약 회귀를 잡는 canary다. 전수 크롤 계약은 바뀌지 않는다.
+    min_expected = 0 if smoke else args.min_expected
     if min_expected > 0 and len(seen) < min_expected:
         print(
             f"WARNING: only {len(seen)} items collected (< {min_expected} minimum "
@@ -562,6 +566,10 @@ def main():
     p_list.add_argument("--max-pages", type=int, default=40)
     p_list.add_argument("--min-expected", type=int, default=MIN_EXPECTED,
                         help="fail (exit 2) below this many items; 0 disables the check")
+    p_list.add_argument("--smoke", action="store_true",
+                        help="저부하 CI 스모크: page-cap·min_expected coverage 검증만 "
+                        "완화(page-1 파싱 0건·네트워크 실패는 그대로 실패). "
+                        "--max-pages 1 과 함께 첫 페이지 계약만 확인할 때 쓴다")
     p_list.set_defaults(func=cmd_list)
 
     p_det = sub.add_parser("detail", help="save detail-page text")
