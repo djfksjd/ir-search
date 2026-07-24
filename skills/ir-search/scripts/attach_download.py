@@ -26,6 +26,7 @@ hash 계약:
   지우면 반복 실패 두 런 사이의 본문 변경이 diff에서 숨기 때문.
 """
 import hashlib
+import html
 import os
 import pathlib
 import re
@@ -136,6 +137,7 @@ def safe_filename(name, idx):
 
 
 _MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
+_MAX_UNESCAPE = 5  # 반복 HTML 엔티티 디코딩 상한 (&amp;amp;amp; 다중 인코딩 커버)
 
 
 def _robots_path_match(path, pattern):
@@ -192,16 +194,87 @@ def robots_allowed(url, disallowed_prefixes):
                    for c in candidates for p in disallowed_prefixes)
 
 
+def _unescape_fixed_point(s):
+    """다중 인코딩 HTML 엔티티(&amp;amp;amp;)를 고정점까지 반복 디코드."""
+    for _ in range(_MAX_UNESCAPE):
+        un = html.unescape(s)
+        if un == s:
+            return s
+        s = un
+    return s
+
+
+def filename_from_content_disposition(cd_header):
+    """원시 Content-Disposition 헤더에서 filename 값을 추출한다.
+
+    email 파서의 get_filename()은 **따옴표 없는** 값에서 `&amp;` 내부 `;`를
+    파라미터 구분자로 오인해 자른다(실측 SMTECH 2026-07-24):
+      `filename=2026³â R&amp;D.hwp` → `2026³â R&amp` (`;D.hwp` 소실).
+    그래서 원시 헤더를 직접 파싱한다:
+      1. RFC 6266 확장 `filename*=charset'lang'pct-encoded` 우선.
+      2. 따옴표로 감싼 `filename="..."`는 그 안을 그대로.
+      3. 따옴표 없는 `filename=`는 **엔티티를 먼저 고정점까지 디코드해**
+         `&amp;` 내부 `;`를 없앤 뒤 남은 첫 `;`까지를 값으로 본다 —
+         파라미터 구분 `;`만 남으므로 파일명 전체가 살아남는다.
+    latin-1 모지바케 바이트는 그대로 둔 채(값 문자열만 추출) recover_filename이
+    이후 인코딩을 복구한다. 파싱 실패 시 None."""
+    if not cd_header:
+        return None
+    m = re.search(r"filename\*\s*=\s*([^;]+)", cd_header, re.IGNORECASE)
+    if m:
+        parts = m.group(1).strip().split("'", 2)
+        if len(parts) == 3:
+            charset, _lang, enc = parts
+            try:
+                return urllib.parse.unquote(
+                    enc, encoding=charset or "utf-8", errors="strict")
+            except (LookupError, UnicodeDecodeError, ValueError):
+                pass  # 확장 파싱 실패 — 일반 filename= 폴백
+    m = re.search(r'filename\s*=\s*"([^"]*)"', cd_header, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"filename\s*=\s*(.+)$", cd_header, re.IGNORECASE)
+    if not m:
+        return None
+    # 엔티티를 먼저 디코드(&amp;→&)해 파라미터 구분 ';' 오인을 제거한 뒤 절단
+    return _unescape_fixed_point(m.group(1)).split(";", 1)[0].strip() or None
+
+
 def recover_filename(cd_name):
-    """Content-Disposition 파일명 복구: 서버가 UTF-8 바이트를 그대로 보내면
-    latin-1로 잘못 디코드된 모지바케가 온다 — 되돌려서 복원
-    (실측: bizinfo, 2026-07-23). %-인코딩도 unquote한다."""
+    """추출된 Content-Disposition 파일명 값의 인코딩을 복구한다.
+
+    서버가 파일명 바이트를 latin-1로 흘려보내면 모지바케가 온다. 인코딩은
+    서버·파일마다 다르다 — 실측:
+      - bizinfo: UTF-8 바이트를 latin-1로 디코드 (2026-07-23)
+      - SMTECH: 일부 첨부는 **CP949(EUC-KR)** 바이트 + `&amp;` 엔티티 포함
+        (2026-07-24) → `Ú 2026³â Áß¼Ò_â¾_ R_amp`처럼 깨졌다.
+
+    규칙(단순·무회귀) — **UTF-8 우선, 실패 시에만 CP949**:
+      1. cd_name을 latin-1 바이트로 되돌린다. `.encode("latin-1")`이 실패하면
+         (이미 정상 한글 등) 재해석하지 않고 원본을 유지한다.
+      2. latin-1 raw를 UTF-8로 디코드해 **성공하면 한글 유무와 무관하게 무조건
+         채택**한다. 한글 개수·유무 휴리스틱은 정상 UTF-8(`AI·DX.pdf`,
+         `기술·개발.pdf`)을 CP949로 재해석해 훼손하는 회귀를 낳아 폐기했다.
+      3. CP949(EUC-KR) 폴백은 **UTF-8 디코드가 UnicodeDecodeError로 실패할
+         때만** 시도한다 — SMTECH(cp949-as-latin1)는 utf-8이 raise → cp949로
+         복구되고, bizinfo류(utf-8-as-latin1)는 utf-8 성공 → cp949 미도달.
+      4. `html.unescape`를 고정점까지 반복해 잔여 엔티티를 디코드하고,
+         %-인코딩은 unquote한다(헤더 파서가 이미 처리했어도 심층 방어)."""
     if not cd_name:
         return cd_name
     try:
-        cd_name = cd_name.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
+        raw = cd_name.encode("latin-1")
+    except UnicodeEncodeError:
+        raw = None  # 이미 non-latin1(정상 한글 등) — 바이트 재해석 금지
+    if raw is not None:
+        try:
+            cd_name = raw.decode("utf-8")  # utf-8 성공 → 무조건 채택
+        except UnicodeDecodeError:
+            try:
+                cd_name = raw.decode("cp949")  # utf-8 실패 시에만 CP949 폴백
+            except UnicodeDecodeError:
+                pass  # 둘 다 실패 — 원본 유지
+    cd_name = _unescape_fixed_point(cd_name)
     if "%" in cd_name:
         cd_name = urllib.parse.unquote(cd_name)
     return cd_name
@@ -227,7 +300,13 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts,
             length = r.headers.get("Content-Length")
             if length and length.isdigit() and int(length) > MAX_ATTACH_BYTES:
                 raise RuntimeError(f"첨부 Content-Length가 상한 초과: {length}")
-            cd_name = recover_filename(r.headers.get_filename())
+            # 원시 Content-Disposition을 직접 파싱한다 — email의 get_filename()은
+            # 따옴표 없는 값의 &amp; 내부 ';'를 파라미터 구분자로 오인해 자른다.
+            raw_name = filename_from_content_disposition(
+                r.headers.get("Content-Disposition"))
+            if raw_name is None:  # Content-Type name= 등 다른 경로는 email 파서 폴백
+                raw_name = r.headers.get_filename()
+            cd_name = recover_filename(raw_name)
             path = (pathlib.Path(dirpath) /
                     safe_filename(cd_name or fallback_name, idx)).resolve()
             if os.path.commonpath([str(path), dirpath]) != dirpath \
@@ -311,14 +390,14 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
         except RedirectBlocked as e:
             f["download_status"] = "blocked_redirect"
             f["download_reason"] = str(e)
-            print(f"WARNING [{tag}] attachment {f.get('filename', '?')}: "
+            print(f"WARNING [{tag}] attachment {f.get('filename') or '?'}: "
                   f"리다이렉트 차단 — {e}", file=sys.stderr)
             continue
         except (urllib.error.URLError, urllib.error.HTTPError,
                 RuntimeError, OSError, TimeoutError) as e:
             f["download_status"] = "failed"
             f["download_reason"] = str(e)
-            print(f"WARNING [{tag}] attachment {f.get('filename', '?')}: {e}",
+            print(f"WARNING [{tag}] attachment {f.get('filename') or '?'}: {e}",
                   file=sys.stderr)
             continue
         f["local_path"] = str(path)

@@ -287,6 +287,58 @@ def test_premarked_status_preserved_by_process_attachments(attach_download,
     assert atts[0]["download_status"] == "skipped_unverified"
 
 
+# ---- 버그1 회귀: filename=None 첨부만 있는 상세가 크래시 없이 partial ----------
+# pms.kocca.kr(popup2)만 있는 공고는 첨부가 전부 filename=None인
+# skipped_unverified다. cmd_detail의 불완전 첨부 경고 조립부가
+# ', '.join([None])로 TypeError를 내며 통째로 실패하던 회귀를 고정한다.
+
+KOCCA_POPUP2_ONLY_HTML = """
+<html><body>
+<div id="contents_body">
+<p>KOCCA pms-only 공고 본문</p>
+<a href="javascript:openNoticeFileList2('76JNATPO10LM1AV000')">PMS 첨부</a>
+</div>
+<footer id="footer">푸터</footer>
+</body></html>
+"""
+
+
+def test_kocca_pms_only_none_filename_no_crash_v2_exit2(
+        sources_crawl, attach_download, monkeypatch, tmp_path, capsys):
+    """popup2(pms)만 있어 첨부가 전부 filename=None인 상세:
+    TypeError 크래시 없이 본문 v2 + attachments_complete:false + 링크 기록 +
+    exit 2가 된다. (pre-fix: ', '.join([None])가 TypeError를 내며 해당 공고가
+    깔끔한 PARTIAL 대신 FAIL로 강등됐다.)"""
+    def boom(req, timeout):
+        raise AssertionError("계약 미확정 pms 링크에 요청이 나갔다")
+
+    monkeypatch.setattr(attach_download, "_urlopen", boom)
+    jsonl = write_rec(tmp_path, "kocca.jsonl",
+                      {"source": "kocca", "id": "326D00068009", "title": "합성"})
+    with pytest.raises(SystemExit) as e:
+        sources_crawl.cmd_detail(
+            lambda url, data=None: (200, KOCCA_POPUP2_ONLY_HTML),
+            ["https://www.kocca.kr/kocca/pims/view.do?intcNo=326D00068009"],
+            str(tmp_path / "details"),
+            download_dir=str(tmp_path / "atts"), merge_into=str(jsonl))
+    assert e.value.code == 2  # partial — 크래시(FAIL) 아님
+    err = capsys.readouterr().err
+    # 크래시(join TypeError)가 삼켜져 FAIL로 강등되지 않고 깔끔한 PARTIAL로 보고
+    assert "PARTIAL attachments incomplete" in err
+    assert "expected str instance" not in err  # TypeError 흔적 없음
+    assert "TypeError" not in err
+    rec = json.loads(jsonl.read_text(encoding="utf-8"))
+    assert rec["attachments_complete"] is False
+    assert rec["hash_version"] == 2  # 본문 v2 유지
+    body = sources_crawl.extract_body(
+        KOCCA_POPUP2_ONLY_HTML, *sources_crawl.BODY_MARKERS["kocca"])
+    assert rec["content_hash"] == hashlib.sha256(body.encode()).hexdigest()
+    (att,) = rec["attachments"]  # 링크가 기록됐다
+    assert att["download_status"] == "skipped_unverified"
+    assert att["filename"] is None
+    assert "pms.kocca.kr" in att["url"]
+
+
 # ---- Codex 게이트(PR #15) NO-GO 4건 회귀 --------------------------------------
 
 def test_exact_host_excludes_subdomains(attach_download):

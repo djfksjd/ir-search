@@ -959,7 +959,11 @@ def cmd_detail(fetch, urls, outdir, download_dir=None, merge_into=None):
                           f"확인으로 전환 (v2/incomplete 병합 완료): {manual}",
                           file=sys.stderr)
                 elif not complete:
-                    bad = [f.get("filename", "?") for f in attachments
+                    # filename 키가 존재하되 값이 None인 첨부(예: KOCCA popup2
+                    # skipped_unverified)를 ', '.join이 TypeError로 터뜨리지
+                    # 않도록 None도 "?"로 치환 — .get(k, default)는 키가 없을
+                    # 때만 기본값을 주므로 `or "?"`가 필요하다.
+                    bad = [f.get("filename") or "?" for f in attachments
                            if f.get("download_status") != "ok"]
                     results.append((url, f"PARTIAL attachments incomplete "
                                          f"({len(bad)}): {', '.join(bad[:5])}"))
