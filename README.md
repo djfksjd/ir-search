@@ -58,13 +58,20 @@ K-Startup·기업마당(bizinfo)·NIPA·KOCCA·SMTECH의 모집중 공고를 크
 
 | 소스                                    | 내용                                          | 크롤러                |
 | --------------------------------------- | --------------------------------------------- | --------------------- |
-| [K-Startup](https://www.k-startup.go.kr) | 창업지원 통합 (기본)                          | `kstartup_crawl.py` |
+| [K-Startup](https://www.k-startup.go.kr) | 창업지원 통합 (기본)                          | `kstartup_crawl.py` (+ `kstartup_api.py`) |
 | [기업마당](https://www.bizinfo.go.kr)    | 전 부처·지자체 중소기업 지원 (최대 커버리지) | `sources_crawl.py`  |
 | [NIPA](https://www.nipa.kr)              | AI/ICT 사업                                   | `sources_crawl.py`  |
 | [KOCCA](https://www.kocca.kr)            | 콘텐츠 지원                                   | `sources_crawl.py`  |
 | [SMTECH](https://www.smtech.go.kr)       | 중기부 R&D                                    | `sources_crawl.py`  |
 
 그 외 소스(NIA·IITP·IRIS·지역기관 등)는 `skills/ir-search/references/sources.md`의 레지스트리 참조.
+
+### K-Startup 공식 API (선택 — 있으면 더 정확·빠름, 없으면 크롤)
+
+`kstartup_crawl.py list`는 [공공데이터포털](https://www.data.go.kr/data/15125364/openapi.do)의 **data.go.kr 서비스키**가 있으면 K-Startup 공식 오픈API로 모집중 공고를 받고, **키가 없거나 API가 실패·차단·이상이면 자동으로 공개 페이지 크롤로 폴백**합니다(출력 스키마·매니페스트 동일). 키는 리포 루트 `.env`(`DATA_GO_KR_KEY=...`), 환경변수 `DATA_GO_KR_KEY`, 또는 공용 `~/.config/data_go_kr_key`에서 읽으며 **로그·에러·명령행에 절대 출력되지 않습니다**(`.env`는 `.gitignore`). 같은 키가 sole-search의 gov24에도 재사용됩니다.
+
+- **커버리지 정직성**: 이 데이터셋은 등록순(최신우선)이라 API가 전수 소진을 증명하면 `stop_reason: api`·exit 0, 최신우선 조기종료(최근 창)면 `stop_reason: api-window`·**exit 2(partial)**로 남깁니다. 전수 보증은 크롤이 권위이며 diff는 partial 실행에서 소멸을 단정하지 않습니다.
+- **기업마당(bizinfo)은 크롤 유지** — 공식 API가 별도 `crtfcKey`(기업마당 발급, data.go.kr 키와 다름)를 요구하고 크롤이 이미 전수 커버리지를 제공하므로 API를 쓰지 않습니다.
 
 ## 설치
 
@@ -176,7 +183,8 @@ ir-search/
     └── ir-search/
         ├── SKILL.md                  # 워크플로 (프로필 → 전수수집 → 전수검토 → 상세검증 → 3분류 보고)
         ├── scripts/
-        │   ├── kstartup_crawl.py     # K-Startup 크롤러
+        │   ├── kstartup_crawl.py     # K-Startup 크롤러 (API 우선, 키 없으면 크롤 폴백)
+        │   ├── kstartup_api.py       # K-Startup 공식 오픈API 클라이언트 (data.go.kr)
         │   ├── sources_crawl.py      # 기업마당·NIPA·KOCCA·SMTECH 크롤러
         │   └── diff_surveys.py       # 재조사 증분 비교 (신규/마감변경/종료)
         └── references/sources.md     # 소스 레지스트리 (검증된 접근법 + 보조 소스)
