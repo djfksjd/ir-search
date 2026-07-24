@@ -26,6 +26,7 @@ hash 계약:
   지우면 반복 실패 두 런 사이의 본문 변경이 diff에서 숨기 때문.
 """
 import hashlib
+import html
 import os
 import pathlib
 import re
@@ -192,16 +193,51 @@ def robots_allowed(url, disallowed_prefixes):
                    for c in candidates for p in disallowed_prefixes)
 
 
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _hangul_count(s):
+    return len(_HANGUL_RE.findall(s))
+
+
 def recover_filename(cd_name):
-    """Content-Disposition 파일명 복구: 서버가 UTF-8 바이트를 그대로 보내면
-    latin-1로 잘못 디코드된 모지바케가 온다 — 되돌려서 복원
-    (실측: bizinfo, 2026-07-23). %-인코딩도 unquote한다."""
+    """Content-Disposition 파일명 복구.
+
+    서버가 파일명 바이트를 latin-1로 흘려보내면 모지바케가 온다. 인코딩은
+    서버·파일마다 다르다 — 실측:
+      - bizinfo: UTF-8 바이트를 latin-1로 디코드 (2026-07-23)
+      - SMTECH: 일부 첨부는 **CP949(EUC-KR)** 바이트 + `&amp;` 같은 HTML
+        엔티티 포함 (2026-07-24). latin-1→utf-8만으론 복구 불가 →
+        `Ú 2026³â Áß¼Ò_â¾_ R_amp`처럼 깨졌다.
+
+    복구 전략(정상 이름 훼손 방지):
+      1. cd_name을 latin-1 바이트로 되돌린 뒤 UTF-8 → CP949 순으로 디코드해
+         후보를 만든다. `.encode("latin-1")`이 실패하면(이미 정상 한글 등)
+         재해석하지 않고 원본을 유지한다.
+      2. **원본(모지바케)보다 유효한 한글 음절이 더 많은 후보만 채택**한다 —
+         이미 올바른 UTF-8 한글 이름을 CP949로 오해석해 깨뜨리지 않는다.
+         UTF-8 후보를 먼저 평가하므로 동점(예: 순수 ASCII)에서는 원본/UTF-8이
+         이긴다.
+      3. `html.unescape`로 `&amp;`→`&` 등 HTML 엔티티를 디코드하고,
+         %-인코딩은 unquote한다(현행 유지)."""
     if not cd_name:
         return cd_name
     try:
-        cd_name = cd_name.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
+        raw = cd_name.encode("latin-1")
+    except UnicodeEncodeError:
+        raw = None  # 이미 non-latin1(정상 한글 등) — 바이트 재해석 금지
+    if raw is not None:
+        best, best_score = cd_name, _hangul_count(cd_name)
+        for enc in ("utf-8", "cp949"):
+            try:
+                cand = raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            score = _hangul_count(cand)
+            if score > best_score:  # 엄격한 > — 동점 시 앞선(UTF-8) 후보 우선
+                best, best_score = cand, score
+        cd_name = best
+    cd_name = html.unescape(cd_name)
     if "%" in cd_name:
         cd_name = urllib.parse.unquote(cd_name)
     return cd_name
@@ -311,14 +347,14 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts,
         except RedirectBlocked as e:
             f["download_status"] = "blocked_redirect"
             f["download_reason"] = str(e)
-            print(f"WARNING [{tag}] attachment {f.get('filename', '?')}: "
+            print(f"WARNING [{tag}] attachment {f.get('filename') or '?'}: "
                   f"리다이렉트 차단 — {e}", file=sys.stderr)
             continue
         except (urllib.error.URLError, urllib.error.HTTPError,
                 RuntimeError, OSError, TimeoutError) as e:
             f["download_status"] = "failed"
             f["download_reason"] = str(e)
-            print(f"WARNING [{tag}] attachment {f.get('filename', '?')}: {e}",
+            print(f"WARNING [{tag}] attachment {f.get('filename') or '?'}: {e}",
                   file=sys.stderr)
             continue
         f["local_path"] = str(path)

@@ -120,6 +120,49 @@ def test_host_allowed_spoof_resistant(attach_download):
     assert not ok("http://www.bizinfo.go.kr/x", HOSTS)
 
 
+# --------------------------------------------------------- recover_filename
+# 버그2 회귀: SMTECH는 일부 첨부 파일명을 CP949(EUC-KR) + `&amp;` HTML
+# 엔티티로 보낸다. latin-1→utf-8만 하던 recover_filename이 CP949를 복구하지
+# 못해 mojibake로 저장되던 것을 고정한다. 정상 UTF-8/한글 이름 무회귀도 검증.
+
+
+def test_recover_filename_cp949_mojibake_restored(attach_download):
+    """(a) CP949 바이트를 latin-1로 디코드한 mojibake → 올바른 한글 복구."""
+    original = "2026년 중소기업 지원.hwp"
+    mojibake = original.encode("cp949").decode("latin-1")
+    assert mojibake != original  # 실제로 깨진 상태에서 출발
+    assert attach_download.recover_filename(mojibake) == original
+
+
+def test_recover_filename_valid_utf8_hangul_untouched(attach_download):
+    """(b) 이미 정상인 UTF-8 한글 이름 → CP949로 오해석해 훼손하지 않는다."""
+    for name in ("서식1.hwp", "붙임_2._신청서.hwp", "공고문.pdf"):
+        assert attach_download.recover_filename(name) == name
+
+
+def test_recover_filename_html_entity_amp_decoded(attach_download):
+    """(c) `&amp;` HTML 엔티티 → `&`로 디코드."""
+    assert attach_download.recover_filename("R&amp;D_지원.hwp") == "R&D_지원.hwp"
+    # CP949 mojibake + &amp;가 함께 온 SMTECH 실측 형태도 복구
+    smtech = "2026년 R&D.hwp"
+    moji = smtech.encode("cp949").decode("latin-1").replace("&", "&amp;")
+    assert attach_download.recover_filename(moji) == smtech
+
+
+def test_recover_filename_utf8_as_latin1_still_recovered(attach_download):
+    """(d) UTF-8-as-latin1(기존 bizinfo 케이스) → 무회귀로 여전히 복구."""
+    original = "공고문.pdf"
+    mojibake = original.encode("utf-8").decode("latin-1")
+    assert attach_download.recover_filename(mojibake) == original
+
+
+def test_recover_filename_ascii_and_percent_unquote(attach_download):
+    """순수 ASCII는 그대로, %-인코딩은 unquote(현행 유지)."""
+    assert attach_download.recover_filename("form.pdf") == "form.pdf"
+    assert attach_download.recover_filename("%EA%B3%B5%EA%B3%A0.hwp") == "공고.hwp"
+    assert attach_download.recover_filename(None) is None
+
+
 # ------------------------------------------------------- download_attachment
 
 def test_download_ok_sha256_and_filename(attach_download, monkeypatch, tmp_path):
