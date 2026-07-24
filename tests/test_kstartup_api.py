@@ -51,11 +51,10 @@ def test_redactor_masks_key_and_encoded_variants(kstartup_api):
 def test_redactor_masks_mixed_case_percent_escapes(kstartup_api):
     key = "ab+cd="  # -> canonical encoding ab%2Bcd%3D
     redact = kstartup_api._make_redactor(key)
-    # a server/library that lower-cased the %XX escapes must still be masked
-    assert "%2b" not in redact("boom ab%2bcd%3d tail").lower() or "<KEY>" in redact(
-        "boom ab%2bcd%3d tail"
-    )
-    assert "<KEY>" in redact("ab%2bcd%3d")
+    # a server/library that lower-cased the %XX escapes must still be masked,
+    # exactly (no unintended surrounding transformation)
+    assert redact("boom ab%2bcd%3d tail") == "boom <KEY> tail"
+    assert redact("ab%2Bcd%3D") == "<KEY>"  # canonical upper-case too
 
 
 # ---- key encoding ----------------------------------------------------------
@@ -92,6 +91,7 @@ class _FakeResp:
         self._status = status
         self._url = url
         self.headers = {"Location": location} if location else {}
+        self.read_called = False
 
     def getcode(self):
         return self._status
@@ -100,25 +100,36 @@ class _FakeResp:
         return self._url
 
     def read(self):
+        self.read_called = True
         return self._body
 
 
 def test_fetch_page_refuses_redirect(kstartup_api, monkeypatch):
-    monkeypatch.setattr(
-        kstartup_api._OPENER, "open",
-        lambda *a, **k: _FakeResp(status=302, location="https://evil.com/x"),
-    )
+    resp = _FakeResp(status=302, location="https://evil.com/x")
+    monkeypatch.setattr(kstartup_api._OPENER, "open", lambda *a, **k: resp)
     with pytest.raises(kstartup_api.ApiError):
         kstartup_api._fetch_page("key", 1, kstartup_api._make_redactor("key"))
+    assert resp.read_called is False  # a 3xx body must never be read
 
 
 def test_fetch_page_refuses_foreign_response_host(kstartup_api, monkeypatch):
-    monkeypatch.setattr(
-        kstartup_api._OPENER, "open",
-        lambda *a, **k: _FakeResp(b"{}", url="https://evil.com/x"),
-    )
+    resp = _FakeResp(b"{}", url="https://evil.com/x")
+    monkeypatch.setattr(kstartup_api._OPENER, "open", lambda *a, **k: resp)
     with pytest.raises(kstartup_api.ApiError):
         kstartup_api._fetch_page("key", 1, kstartup_api._make_redactor("key"))
+    assert resp.read_called is False  # body must NOT be read from a foreign host
+
+
+def test_fetch_page_threads_per_page(kstartup_api, monkeypatch):
+    captured = {}
+
+    def fake_open(req, *a, **k):
+        captured["url"] = req.full_url
+        return _FakeResp(b'{"data":[],"totalCount":0}')
+
+    monkeypatch.setattr(kstartup_api._OPENER, "open", fake_open)
+    kstartup_api._fetch_page("key", 2, kstartup_api._make_redactor("key"), per_page=37)
+    assert "perPage=37" in captured["url"] and "page=2" in captured["url"]
 
 
 def test_fetch_page_403_escalates_manual(kstartup_api, monkeypatch):
@@ -312,8 +323,9 @@ def test_list_duplicate_page_does_not_early_stop(kstartup_api, monkeypatch):
     monkeypatch.setattr(
         kstartup_api, "_fetch_page", _fake_pages([page1, page2, page3])
     )
-    recs, _t, _pg, _proven = kstartup_api.list_announcements("key", min_expected=1)
+    recs, _t, _pg, proven = kstartup_api.list_announcements("key", min_expected=1)
     assert len(recs) == 2 * p  # dup page must NOT have stopped collection
+    assert proven is True  # scanned 3*PER_PAGE == totalCount
 
 
 def test_list_stops_after_zero_open_streak(kstartup_api, monkeypatch):
@@ -391,7 +403,7 @@ def test_cmd_list_api_success_writes_manifest(kstartup_crawl, kstartup_api, monk
 def test_cmd_list_api_window_manifest(kstartup_crawl, kstartup_api, monkeypatch, tmp_path):
     import json
     monkeypatch.setattr(kstartup_api, "load_key", lambda: "k")
-    # proven=False -> honest recent-window manifest, still exit 0
+    # proven=False -> honest recent-window manifest, partial/exit 2
     monkeypatch.setattr(
         kstartup_api, "list_announcements",
         lambda key, min_expected=1, max_pages=None: ([_normalized("1")], 9566, 8, False),
@@ -452,3 +464,106 @@ def _normalized(sn):
         "deadline": "2026-07-31", "agency_type": "",
         "url": f"https://www.k-startup.go.kr/web/contents/bizpbanc-ongoing.do?schM=view&pbancSn={sn}",
     }
+
+
+# ---- real-response fixture: schema drift & normalization -------------------
+
+TEN_KEYS = {
+    "pbancSn", "category", "dday", "title", "program",
+    "org", "start", "deadline", "agency_type", "url",
+}
+
+
+def test_real_fixture_parses_and_normalizes(kstartup_api, kstartup_api_sample):
+    """A captured, key-free real data.go.kr response must parse with the modern
+    envelope and normalize to the exact ten-key schema — catches field renames
+    against the last-captured snapshot."""
+    assert kstartup_api._recognized_envelope(kstartup_api_sample)
+    raw = kstartup_api._raw_container(kstartup_api_sample)
+    assert raw is not None and len(raw) == 2 and all(isinstance(r, dict) for r in raw)
+    total = kstartup_api._total(kstartup_api_sample)
+    assert isinstance(total, int) and total > 0
+    for rec in raw:
+        norm = kstartup_api._normalize(rec)
+        assert norm is not None
+        assert set(norm) == TEN_KEYS
+        assert norm["pbancSn"] and norm["title"]
+        assert "k-startup.go.kr" in norm["url"]
+
+
+def test_real_fixture_mixed_records_raise(kstartup_api, kstartup_api_sample, monkeypatch):
+    bad = dict(kstartup_api_sample)
+    bad["data"] = list(kstartup_api_sample["data"]) + ["junk"]  # dict(s) + non-dict
+    bad["totalCount"] = 3
+    monkeypatch.setattr(kstartup_api, "_fetch_page", lambda *a, **k: bad)
+    with pytest.raises(kstartup_api.ApiError):  # len(recs) != raw_count
+        kstartup_api.list_announcements("key", min_expected=1)
+
+
+def test_real_fixture_unnormalizable_open_record_raises(
+    kstartup_api, kstartup_api_sample, monkeypatch
+):
+    import copy
+    bad = copy.deepcopy(kstartup_api_sample)
+    for r in bad["data"]:
+        for idk in ("pbanc_sn", "biz_pbanc_sn", "pbancSn"):
+            r.pop(idk, None)  # an open record whose id field vanished
+        r["pbanc_rcpt_end_dt"] = "20991231"  # ensure it counts as open
+    bad["totalCount"] = 2
+    monkeypatch.setattr(kstartup_api, "_fetch_page", lambda *a, **k: bad)
+    with pytest.raises(kstartup_api.ApiError):  # norm is None on an open record
+        kstartup_api.list_announcements("key", min_expected=1)
+
+
+def test_api_normalize_matches_crawler_schema(kstartup_api, kstartup_crawl, fixture_html):
+    """The API record schema must equal the HTML crawler's record schema so the
+    two paths stay drop-in interchangeable (incl. diff mode). Compared against
+    the crawler's REAL parsed output, not a hardcoded list — so a crawler field
+    add/rename fails here instead of silently breaking parity."""
+    crawler_recs = kstartup_crawl.parse_list(fixture_html("kstartup_list.html"))
+    assert crawler_recs, "crawler fixture should parse at least one record"
+    crawler_keys = set(crawler_recs[0].keys())
+    assert TEN_KEYS == crawler_keys
+    assert set(_normalized("1").keys()) == crawler_keys
+
+
+def test_list_threads_per_page_to_fetch(kstartup_api, monkeypatch):
+    seen = {}
+
+    def fake(key, page, redact, per_page=None):
+        seen["per_page"] = per_page
+        return {"totalCount": 1, "data": [_open(1)]}
+
+    monkeypatch.setattr(kstartup_api, "_fetch_page", fake)
+    kstartup_api.list_announcements("key", min_expected=1, per_page=42)
+    assert seen["per_page"] == 42
+
+
+# ---- opt-in live API canary (skipped without a key) ------------------------
+
+@pytest.mark.live_api
+def test_live_api_contract(kstartup_api):
+    """Calls the REAL data.go.kr API (one page) and validates the live envelope,
+    fields, normalization, and key non-leakage. Skipped when no key is present;
+    schedule it in CI with a protected DATA_GO_KR_KEY to catch schema drift.
+    Calls _fetch_page directly (NOT cmd_list) so crawl fallback cannot mask an
+    API contract failure."""
+    import os
+    if not os.environ.get("IR_SEARCH_LIVE_API"):
+        pytest.skip("live API canary is opt-in (set IR_SEARCH_LIVE_API=1)")
+    key = kstartup_api.load_key()
+    if not key:
+        pytest.skip("no DATA_GO_KR_KEY — live API canary skipped")
+    payload = kstartup_api._fetch_page(
+        key, 1, kstartup_api._make_redactor(key), per_page=3
+    )
+    assert kstartup_api._recognized_envelope(payload)
+    raw = kstartup_api._raw_container(payload)
+    assert raw and isinstance(raw[0], dict)
+    total = kstartup_api._total(payload)
+    assert isinstance(total, int) and total > 0
+    assert any(k in raw[0] for k in ("pbanc_sn", "biz_pbanc_sn"))
+    norm = kstartup_api._normalize(raw[0])
+    assert norm is not None and set(norm) == TEN_KEYS and norm["title"]
+    import json as _json
+    assert key not in _json.dumps(payload, ensure_ascii=False)  # no key in body

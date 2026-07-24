@@ -5,6 +5,7 @@ on local HTML fixtures). Scripts are loaded by path via importlib so the
 tests exercise exactly what ships in scripts/.
 """
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -83,28 +84,45 @@ def pytest_configure(config):
         "markers",
         "real_key_loader: opt out of the hermetic no-key default to test load_key itself",
     )
+    config.addinivalue_line(
+        "markers",
+        "live_api: opt-in test that calls the real data.go.kr API; skipped without a key",
+    )
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_no_data_go_kr_key(monkeypatch, request):
     """Default: cmd_list sees NO data.go.kr key, so the existing crawl-path
     tests are unaffected by a real `.env` on the developer machine. Tests that
-    exercise the real key loader opt out with @pytest.mark.real_key_loader.
+    exercise the real key loader / real API opt out with the respective marker.
     """
-    if request.node.get_closest_marker("real_key_loader"):
+    if request.node.get_closest_marker("real_key_loader") or request.node.get_closest_marker(
+        "live_api"
+    ):
         return
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
-    try:
-        import kstartup_api  # same module object kstartup_crawl imports
-    except Exception:  # noqa: BLE001 — module may not be importable in some runs
-        return
+    # fail closed: if the module cannot be imported, let the error surface —
+    # silently skipping would leave a real developer key wired into cmd_list.
+    import kstartup_api  # same module object kstartup_crawl imports
     monkeypatch.setattr(kstartup_api, "load_key", lambda: None)
 
 
+@pytest.fixture
+def kstartup_api_sample():
+    """A sanitized real data.go.kr K-Startup response (2 records, 30 fields,
+    NO service key) captured once, for schema-drift / normalization tests."""
+    return json.loads(
+        (FIXTURES_DIR / "kstartup_api_sample.json").read_text(encoding="utf-8")
+    )
+
+
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    """Hard guard: any real socket connection fails the test."""
+def no_network(monkeypatch, request):
+    """Hard guard: any real socket connection fails the test — except for the
+    opt-in @pytest.mark.live_api canary, which needs the real API."""
+    if request.node.get_closest_marker("live_api"):
+        return
     import socket
 
     def _blocked(*args, **kwargs):
