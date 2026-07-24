@@ -186,6 +186,8 @@ ir-search/
         │   ├── kstartup_crawl.py     # K-Startup 크롤러 (API 우선, 키 없으면 크롤 폴백)
         │   ├── kstartup_api.py       # K-Startup 공식 오픈API 클라이언트 (data.go.kr)
         │   ├── sources_crawl.py      # 기업마당·NIPA·KOCCA·SMTECH 크롤러
+        │   ├── attach_download.py    # 첨부 다운로드 공용 (robots 준수·해시)
+        │   ├── run_manifest.py       # run_manifest.json 공용 기록기 (커버리지)
         │   └── diff_surveys.py       # 재조사 증분 비교 (신규/마감변경/종료)
         └── references/sources.md     # 소스 레지스트리 (검증된 접근법 + 보조 소스)
 ```
