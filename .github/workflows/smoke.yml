@@ -40,6 +40,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 크롤러는 curl_cffi(Safari TLS 지문)로 접근한다 — 없으면 urllib로 폴백하는데
+      # 그 경우 대상 사이트가 TLS 지문으로 차단할 수 있어(SKILL.md), canary가 계약
+      # 파손이 아닌 접근 차단을 오탐한다. 프로덕션과 동일 조건을 만들기 위해 설치한다.
+      - run: python -m pip install 'curl_cffi>=0.15'
+
       - name: kstartup list first page
         run: python3 $SCRIPTS/kstartup_crawl.py list -o /tmp/kstartup.jsonl --max-pages 1 --smoke
 
