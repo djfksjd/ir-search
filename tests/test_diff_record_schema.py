@@ -166,7 +166,7 @@ def test_actual_diff_output_conforms_to_schema(schema, diff_surveys,
     write_jsonl(curr / "bizinfo.jsonl", [biz(1, "그대로")])
     out = tmp_path / "new_items.jsonl"
     monkeypatch.setattr("sys.argv", ["diff_surveys.py", str(prev), str(curr),
-                                     "--out", str(out)])
+                                     "--out", str(out), "--assume-complete"])
     diff_surveys.main()
 
     lines = []

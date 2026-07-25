@@ -415,6 +415,7 @@ def list_announcements(key, min_expected=1, per_page=PER_PAGE, max_pages=MAX_PAG
     """
     redact = _make_redactor(key)
     out = {}
+    seen_ids = set()   # every id seen across pages — overlap breaks the position proof
     total = None
     zero_open_streak = 0
     page = 1
@@ -444,6 +445,21 @@ def list_announcements(key, min_expected=1, per_page=PER_PAGE, max_pages=MAX_PAG
             # a mixed container (valid dicts + junk) is a schema change, and the
             # junk still counts toward totalCount — fail closed to the crawl.
             raise ApiError("mixed unparseable records; using crawl")
+        # Exhaustion is proved by scanned ROW POSITIONS reaching totalCount, so
+        # every scanned position must map to a *distinct real id*. If a row has
+        # no id, or an id repeats within this page, or overlaps an id already
+        # seen on a prior page (duplicate/overlapping pagination), the position
+        # counter overshoots while unique coverage stalls — we'd declare `proven`
+        # early and silently drop the real tail. Any of these fails closed to the
+        # crawl (the exhaustive-coverage authority).
+        page_ids = [_pick(r, ("pbanc_sn", "biz_pbanc_sn", "pbancSn")) for r in recs]
+        if not all(page_ids):
+            raise ApiError("record without id; cannot prove coverage; using crawl")
+        if len(set(page_ids)) != len(page_ids):
+            raise ApiError("duplicate ids within a page; using crawl")
+        if seen_ids.intersection(page_ids):
+            raise ApiError("overlapping pages (duplicate ids); using crawl")
+        seen_ids.update(page_ids)
         open_on_page = 0
         for r in recs:
             if not _is_open(r):

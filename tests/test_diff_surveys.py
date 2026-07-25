@@ -34,7 +34,10 @@ def test_new_changed_closed_classification(diff_surveys, monkeypatch, tmp_path, 
         ks(4, "제목이 바뀐 공고", deadline="2026-08-15"),
     ])
     out = tmp_path / "new_items.jsonl"
-    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    # no manifest here → assert-complete signals these were full crawls so GONE
+    # is authorized (coverage-honesty default otherwise suppresses removals)
+    run_diff(diff_surveys, monkeypatch,
+             [str(prev), str(curr), "--out", str(out), "--assume-complete"])
     text = capsys.readouterr().out
     assert "## NEW (1)" in text and "새로 뜬 공고" in text
     assert "## CHANGED (1)" in text and "title" in text and "apply_end" in text
@@ -215,3 +218,110 @@ def test_gone_file_not_loaded_as_raw_crawl(diff_surveys, monkeypatch, tmp_path):
     out = tmp_path / "out.jsonl"
     run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
     assert out.read_text(encoding="utf-8") == ""  # 소멸 잔재가 NEW로 안 뜬다
+
+
+def test_partial_current_run_suppresses_closed(diff_surveys, monkeypatch, tmp_path,
+                                               capsys):
+    """현재 run_manifest.json이 kstartup을 partial(api-window)로 표기하면, 이전에
+    있던 공고의 부재를 CLOSED로 결론짓지 않는다 — partial 수집을 '전부 소멸'로
+    오인하지 않는 커버리지 정직성 계약(Codex #2)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(101, "a"), ks(102, "b")])
+    write_jsonl(curr / "kstartup.jsonl", [ks(101, "a")])  # 102 부재
+    (curr / "run_manifest.json").write_text(json.dumps({
+        "manifest_schema_version": 1, "generated_at": "2026-07-25T00:00:00+09:00",
+        "runs": [{"source": "kstartup", "status": "partial", "exit_code": 2,
+                  "pages_fetched": 1, "collected": 1, "stop_reason": "api-window"}],
+    }), encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    o = capsys.readouterr().out
+    assert "## CLOSED (0)" in o
+    assert "CLOSED SUPPRESSED" in o
+    assert (tmp_path / "gone_out.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_source_absent_from_manifest_suppresses_closed(diff_surveys, monkeypatch,
+                                                       tmp_path, capsys):
+    """현재 매니페스트에 kstartup 실행 기록이 아예 없으면(다른 소스만 ok) kstartup
+    커버리지가 증명되지 않았으므로 kstartup 공고 부재를 CLOSED로 결론짓지
+    않는다 — GONE은 '전수 증명된 소스'에만 허용(Codex #2 residual)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(101, "a"), ks(102, "b")])
+    write_jsonl(curr / "kstartup.jsonl", [ks(101, "a")])  # 102 부재
+    (curr / "run_manifest.json").write_text(json.dumps({
+        "manifest_schema_version": 1, "generated_at": "2026-07-25T00:00:00+09:00",
+        "runs": [{"source": "bizinfo", "status": "ok", "exit_code": 0,
+                  "pages_fetched": 1, "collected": 1, "stop_reason": "done"}],
+    }), encoding="utf-8")  # kstartup 항목 없음
+    out = tmp_path / "out.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    o = capsys.readouterr().out
+    assert "## CLOSED (0)" in o
+    assert "CLOSED SUPPRESSED" in o
+    assert (tmp_path / "gone_out.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_ok_current_run_reports_closed(diff_surveys, monkeypatch, tmp_path, capsys):
+    """반대로 현재 run이 ok(전수 증명)면 102 부재는 정상적으로 CLOSED."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(101, "a"), ks(102, "b")])
+    write_jsonl(curr / "kstartup.jsonl", [ks(101, "a")])
+    (curr / "run_manifest.json").write_text(json.dumps({
+        "manifest_schema_version": 1, "generated_at": "2026-07-25T00:00:00+09:00",
+        "runs": [{"source": "kstartup", "status": "ok", "exit_code": 0,
+                  "pages_fetched": 3, "collected": 1, "stop_reason": "api"}],
+    }), encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out", str(out)])
+    o = capsys.readouterr().out
+    assert "## CLOSED (1)" in o
+    gone = [x for x in (tmp_path / "gone_out.jsonl").read_text().splitlines() if x.strip()]
+    assert len(gone) == 1
+
+
+def test_first_hash_appearance_is_changed(diff_surveys, monkeypatch, tmp_path, capsys):
+    """직전엔 해시가 없다가 이번에 상세를 처음 수집 → CHANGED 재검토(Codex #6)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(1, "공고")])  # 해시 없음
+    rec = ks(1, "공고"); rec["content_hash"] = "h1"; rec["hash_version"] = "v3"
+    write_jsonl(curr / "kstartup.jsonl", [rec])
+    out = tmp_path / "out.jsonl"
+    run_diff(diff_surveys, monkeypatch,
+             [str(prev), str(curr), "--out", str(out), "--assume-complete"])
+    assert "## CHANGED (1)" in capsys.readouterr().out
+    (r,) = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()]
+    assert r["kind"] == "CHANGED" and any("최초 상세수집" in c for c in r["changed_fields"])
+
+
+def test_duplicate_json_keys_rejected(diff_surveys, monkeypatch, tmp_path):
+    """한 줄에 중복 JSON 키(위조 필드)면 즉시 실패(Codex #12)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(1, "a")])
+    (curr / "kstartup.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (curr / "kstartup.jsonl").write_text(
+        '{"pbancSn":"1","pbancSn":"9","title":"x","deadline":"2026-08-01"}\n',
+        encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        run_diff(diff_surveys, monkeypatch, [str(prev), str(curr), "--out",
+                                             str(tmp_path / "o.jsonl")])
+    assert e.value.code != 0
+
+
+def test_incomplete_profile_invalidates_carryover(diff_surveys, monkeypatch,
+                                                  tmp_path, capsys):
+    """판정 축이 하나라도 빠진 프로필은 승계 무효 — 전건 재검토(Codex #14)."""
+    prev, curr = tmp_path / "prev", tmp_path / "curr"
+    write_jsonl(prev / "kstartup.jsonl", [ks(1, "a")])
+    write_jsonl(curr / "kstartup.jsonl", [ks(1, "a")])
+    full = tmp_path / "full.md"
+    full.write_text("- 창업 단계: 예비창업\n- 지역 연고: 충남\n- 대표자: 만 39세 이하\n"
+                    "- 필요한 것: 자금\n", encoding="utf-8")
+    partial = tmp_path / "partial.md"  # 대표자 축 누락
+    partial.write_text("- 창업 단계: 예비창업\n- 지역 연고: 충남\n- 필요한 것: 자금\n",
+                       encoding="utf-8")
+    run_diff(diff_surveys, monkeypatch,
+             [str(prev), str(curr), "--out", str(tmp_path / "o.jsonl"),
+              "--old-profile", str(full), "--new-profile", str(partial),
+              "--assume-complete"])
+    assert "CARRY-OVER INVALIDATED" in capsys.readouterr().out

@@ -56,6 +56,17 @@ from pathlib import Path
 
 COMPARE_FIELDS = ["title", "apply_start", "apply_end", "status", "content_hash"]
 
+
+def _reject_dup_keys(pairs):
+    """object_pairs_hook — 한 레코드에 중복 키가 있으면 거부(Codex #12).
+    기본 로더는 뒤값만 남겨 위조 필드가 검사를 우회한다."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"중복 JSON 키: {k!r}")
+        d[k] = v
+    return d
+
 # ir-search-profile.md bullets that define the judgment axes. If any of these
 # change, previous A/B/C verdicts can no longer be carried over.
 PROFILE_AXES = ["창업 단계", "지역 연고", "대표자", "필요한 것"]
@@ -83,8 +94,8 @@ def load_dir(d: Path):
             if not line:
                 continue
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as e:
+                rec = json.loads(line, object_pairs_hook=_reject_dup_keys)
+            except (json.JSONDecodeError, ValueError) as e:
                 sys.exit(f"ERROR: broken JSON at {f}:{ln} — {e}")
             if "kind" in rec and "record" in rec:
                 continue  # stray diff artifact record — not a raw crawl row
@@ -135,6 +146,44 @@ def profile_fingerprint(fields):
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def gone_eligible_from_manifest(curr_dir):
+    """Sources that MAY yield GONE/CLOSED — only those with a proven-complete
+    current run. Coverage honesty: an announcement can be declared gone only when
+    the current run demonstrably covered that source in full.
+
+    Reads run_manifest.json in *curr_dir* and returns (eligible, note):
+      - eligible: set of source names whose run is status=="ok" AND exit_code==0.
+        A source that is partial (api-window/page-cap/manual/inactive) OR absent
+        from the manifest is NOT eligible — its records must not be reported GONE.
+      - eligible is None when the manifest is absent OR unreadable — the caller
+        then suppresses ALL removals unless --assume-complete is given
+        (fail-closed: a partial/unknown run must never look like everything
+        closed — README ir §K-Startup API).
+    note is a human string for the summary, "" when a clean manifest was read.
+    """
+    mpath = curr_dir / "run_manifest.json"
+    if not mpath.exists():
+        return None, ("no run_manifest.json — coverage unproven; GONE suppressed "
+                      "(pass --assume-complete if these were full crawls)")
+    try:
+        data = json.loads(mpath.read_text(encoding="utf-8"),
+                          object_pairs_hook=_reject_dup_keys)
+        runs = data.get("runs", [])
+        if not isinstance(runs, list):
+            raise ValueError('"runs" not a list')
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError) as e:
+        return None, f"run_manifest.json unreadable ({e}) — GONE suppressed"
+    eligible = set()
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") == "ok" and r.get("exit_code") == 0:
+            s = r.get("source")
+            if s:
+                eligible.add(s)
+    return eligible, ""
+
+
 def changed_fields(old, new):
     return [f for f in COMPARE_FIELDS if (old.get(f) or None) != (new.get(f) or None)]
 
@@ -164,6 +213,11 @@ def classify(old, new):
                 "changed_fields": ["hash_version(산식 전환 — 1회 상세 재검증)"]}
     if old_h and not new_h:
         return {"kind": "NEEDS_REHASH", "changed_fields": []}
+    if new_h and not old_h:
+        # 직전엔 해시가 없었는데 이번에 상세를 처음 수집했다 — 목록 필드가 같아도
+        # 직전 판정은 상세 없이 내려졌을 수 있으므로 1회 재검토(Codex #6).
+        return {"kind": "CHANGED",
+                "changed_fields": ["content_hash(최초 상세수집 — 재검토)"]}
     return {"kind": "UNCHANGED", "changed_fields": []}
 
 
@@ -187,6 +241,11 @@ def main():
     ap.add_argument("--out", type=Path, help="write items needing review as jsonl")
     ap.add_argument("--old-profile", help="profile snapshot used for prev_dir")
     ap.add_argument("--new-profile", help="profile used for curr_dir")
+    ap.add_argument("--assume-complete", action="store_true",
+                    help="treat the current run as a full crawl of every source "
+                         "even without a run_manifest.json (legacy/manual dirs). "
+                         "Without this AND without a proven manifest run, GONE is "
+                         "suppressed — a partial crawl must not read as all-closed.")
     args = ap.parse_args()
 
     for d in (args.prev_dir, args.curr_dir):
@@ -210,12 +269,15 @@ def main():
         new_fields = parse_profile_bullets(args.new_profile)
         # 판정 축(PROFILE_AXES)이 하나도 없는 프로필은 파싱 실패와 같다 — 무관한
         # 불릿만 있는 파일 두 개가 "동일 fingerprint"로 승계를 통과하면 안 된다.
-        old_axes = any(old_fields.get(k) for k in PROFILE_AXES)
-        new_axes = any(new_fields.get(k) for k in PROFILE_AXES)
+        # 판정 축은 하나라도 빠지면(지역만·단계만 등) 승계 근거가 불완전하다 —
+        # any가 아니라 ALL을 요구한다(Codex #14). 미완성 프로필은 승계 무효.
+        old_axes = all(old_fields.get(k) for k in PROFILE_AXES)
+        new_axes = all(new_fields.get(k) for k in PROFILE_AXES)
         if not old_fields or not new_fields or not old_axes or not new_axes:
             invalidate = True
-            print("WARNING: 프로필 파일을 읽지 못했거나 판정 축(창업 단계·지역 등)이 "
-                  "비어 있다 — 승계 무효(fail-closed), 전체 재검토", file=sys.stderr)
+            print("WARNING: 프로필 파일을 읽지 못했거나 판정 축(창업 단계·지역·대표자·"
+                  "필요한 것)이 하나라도 비어 있다 — 승계 무효(fail-closed), 전체 재검토",
+                  file=sys.stderr)
         elif profile_fingerprint(old_fields) != profile_fingerprint(new_fields):
             invalidate = True
             print("WARNING: profile changed — 전체 재판정 필요 "
@@ -228,8 +290,23 @@ def main():
     curr_sources = {k[0] for k in curr}
     common = prev_sources & curr_sources
 
+    # Coverage guard (fail-closed): an announcement may be declared GONE/CLOSED
+    # only for a source the CURRENT run proved it covered in full (manifest
+    # status=ok, exit 0). A partial run (api-window/page-cap) or a source with no
+    # proven run cannot distinguish "closed" from "outside the collected window",
+    # so its removals are suppressed rather than reported as false expirations.
+    eligible, manifest_note = gone_eligible_from_manifest(args.curr_dir)
+    if eligible is None:  # no/unreadable manifest → nothing proven
+        gone_eligible = set(common) if args.assume_complete else set()
+    else:
+        gone_eligible = {s for s in eligible if s in common}
+    suppressed_sources = {s for s in common if s not in gone_eligible}
+
     new = [curr[k] for k in curr if k not in prev and k[0] in common]
-    closed = [prev[k] for k in prev if k not in curr and k[0] in common]
+    closed = [prev[k] for k in prev if k not in curr and k[0] in common
+              and k[0] not in suppressed_sources]
+    suppressed_closed = [prev[k] for k in prev if k not in curr and k[0] in common
+                         and k[0] in suppressed_sources]
     results = {k: classify(prev[k], curr[k]) for k in curr if k in prev}
     changed = [
         (prev[k], curr[k], r["changed_fields"])
@@ -268,6 +345,16 @@ def main():
     print(f"\n## CLOSED ({len(closed)}) — gone since previous run")
     for r in closed:
         print(f"  - [{r.get('source')}] {r.get('title', '(no title)')}")
+
+    if manifest_note:
+        print(f"\n## COVERAGE NOTE — {manifest_note}")
+    if suppressed_closed:
+        srcs = ", ".join(sorted({r.get('source') for r in suppressed_closed}))
+        print(f"\n## CLOSED SUPPRESSED ({len(suppressed_closed)}) — current run for "
+              f"[{srcs}] was partial (api-window/page-cap/manual): absence is NOT "
+              "concluded GONE. Re-run a full crawl to confirm expirations.")
+        for r in suppressed_closed:
+            print(f"  · [{r.get('source')}] {r.get('title', '(no title)')}")
 
     if invalidate:
         print(f"\n## UNCHANGED: {unchanged} items — 승계 불가(프로필 변경), 전건 재검토")

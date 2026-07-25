@@ -36,9 +36,20 @@ def test_make_run_optional_fields_omitted(run_manifest):
     assert run["errors"] == ["HTTP 500"]
 
 
-@pytest.mark.parametrize("status", ["ok", "partial", "manual", "inactive"])
-def test_all_status_values_accepted(run_manifest, status):
-    assert run_manifest.make_run("x", status, 0, 0, 0, "s")["status"] == status
+# status↔exit_code 정합 계약: ok=0, 그 외는 비-0 (partial=2/manual=3/inactive=4)
+@pytest.mark.parametrize("status,code", [("ok", 0), ("partial", 2),
+                                         ("manual", 3), ("inactive", 4)])
+def test_all_status_values_accepted(run_manifest, status, code):
+    assert run_manifest.make_run("x", status, code, 0, 0, "s")["status"] == status
+
+
+def test_status_exit_code_mismatch_rejected(run_manifest):
+    with pytest.raises(ValueError):
+        run_manifest.make_run("x", "ok", 2, 0, 0, "s")       # ok인데 비-0
+    with pytest.raises(ValueError):
+        run_manifest.make_run("x", "partial", 0, 0, 0, "s")  # 비-ok인데 0
+    with pytest.raises(ValueError):
+        run_manifest.make_run("x", "ok", 0, -1, 0, "s")      # 음수 카운트
 
 
 def test_invalid_status_rejected(run_manifest):
@@ -130,3 +141,19 @@ def test_update_manifest_valid_manifest_not_flagged_as_recovered(run_manifest, t
     m = read_manifest(tmp_path)
     assert "recovered_from_corrupt" not in m
     assert not [p for p in os.listdir(tmp_path) if ".corrupt-" in p]
+
+
+def test_manifest_reader_rejects_duplicate_keys(run_manifest, tmp_path):
+    """기존 매니페스트에 중복 키(예: manifest_schema_version 2개)가 있으면 #10
+    검증을 우회하지 못하게 corrupt 처리 후 새로 시작한다(Codex #12)."""
+    out = tmp_path / "kstartup_all.jsonl"
+    (tmp_path / "run_manifest.json").write_text(
+        '{"manifest_schema_version":999,"manifest_schema_version":1,"runs":[]}',
+        encoding="utf-8")
+    run = run_manifest.make_run("kstartup", "ok", 0, 1, 1, "done")
+    run_manifest.update_manifest(str(out), [run])  # 예외 없이 corrupt 보존+재작성
+    data = read_manifest(tmp_path)
+    assert data["manifest_schema_version"] == 1
+    assert "recovered_from_corrupt" in data
+    assert any(p.name.startswith("run_manifest.json.corrupt-")
+               for p in tmp_path.iterdir())

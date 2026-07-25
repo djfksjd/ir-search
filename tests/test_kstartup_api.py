@@ -314,7 +314,12 @@ def test_list_below_min_raises(kstartup_api, monkeypatch):
         kstartup_api.list_announcements("key", min_expected=p + 100)
 
 
-def test_list_duplicate_page_does_not_early_stop(kstartup_api, monkeypatch):
+def test_list_duplicate_page_fails_closed_to_crawl(kstartup_api, monkeypatch):
+    # A repeated page makes the position counter (scanned) overshoot while unique
+    # coverage stalls: scanning positions 0..3p while only ids 0..2p exist would
+    # declare `proven` one page early and silently drop the real tail [2p..3p).
+    # Overlap must fail closed to the crawl (the exhaustive-coverage authority),
+    # never claim proven exhaustion — the coverage-honesty contract.
     p = kstartup_api.PER_PAGE
     tot = 3 * p
     page1 = {"totalCount": tot, "data": [_open(i) for i in range(p)]}
@@ -323,19 +328,44 @@ def test_list_duplicate_page_does_not_early_stop(kstartup_api, monkeypatch):
     monkeypatch.setattr(
         kstartup_api, "_fetch_page", _fake_pages([page1, page2, page3])
     )
-    recs, _t, _pg, proven = kstartup_api.list_announcements("key", min_expected=1)
-    assert len(recs) == 2 * p  # dup page must NOT have stopped collection
-    assert proven is True  # scanned 3*PER_PAGE == totalCount
+    with pytest.raises(kstartup_api.ApiError):
+        kstartup_api.list_announcements("key", min_expected=1)
+
+
+def test_list_within_page_duplicate_ids_fails_closed(kstartup_api, monkeypatch):
+    # A single page whose rows repeat an id (totalCount=2, rows [A, A]) would
+    # dedup to one record while scanned positions reach totalCount → false
+    # proven exhaustion. Must fail closed to the crawl (Codex #3 residual).
+    dup = {"totalCount": 2, "data": [_open("A"), _open("A")]}
+    monkeypatch.setattr(kstartup_api, "_fetch_page", _fake_pages([dup]))
+    with pytest.raises(kstartup_api.ApiError):
+        kstartup_api.list_announcements("key", min_expected=1)
+
+
+def test_list_record_without_id_fails_closed(kstartup_api, monkeypatch):
+    # If a scanned row carries no id we cannot prove it is distinct coverage;
+    # fail closed rather than count a position we cannot verify (Codex #3).
+    page = {"totalCount": 2, "data": [_open("A"), {"biz_pbanc_nm": "no id",
+            "pbanc_rcpt_end_dt": "20991231", "pbanc_rcpt_bgng_dt": "20260101"}]}
+    monkeypatch.setattr(kstartup_api, "_fetch_page", _fake_pages([page]))
+    with pytest.raises(kstartup_api.ApiError):
+        kstartup_api.list_announcements("key", min_expected=1)
 
 
 def test_list_stops_after_zero_open_streak(kstartup_api, monkeypatch):
     p = kstartup_api.PER_PAGE
     stop = kstartup_api.ZERO_OPEN_STOP
     openpage = {"data": [_open(i) for i in range(p)]}
-    closed = {"data": [{"pbanc_sn": f"c{i}", "rcrt_prgs_yn": "N"} for i in range(p)]}
+    # each all-closed page carries DISTINCT ids (real pagination never repeats a
+    # record across pages — identical ids would be an overlap anomaly, caught
+    # separately by test_list_duplicate_page_fails_closed_to_crawl)
+    closed_pages = [
+        {"data": [{"pbanc_sn": f"c{pg}_{i}", "rcrt_prgs_yn": "N"} for i in range(p)]}
+        for pg in range(stop)
+    ]
     # one open page, then exactly ZERO_OPEN_STOP all-closed pages -> stop
     monkeypatch.setattr(
-        kstartup_api, "_fetch_page", _fake_pages([openpage] + [closed] * stop)
+        kstartup_api, "_fetch_page", _fake_pages([openpage] + closed_pages)
     )
     recs, _t, pages, proven = kstartup_api.list_announcements("key", min_expected=1)
     assert len(recs) == p

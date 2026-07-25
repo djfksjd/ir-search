@@ -43,6 +43,17 @@ from datetime import datetime, timedelta, timezone
 
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_NAME = "run_manifest.json"
+
+
+def _reject_dup_keys(pairs):
+    """object_pairs_hook — 중복 키 거부(Codex #12). 중복 manifest_schema_version/
+    status가 #10 검증을 우회하지 못하게 매니페스트 로드에도 적용한다."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"duplicate JSON key: {k!r}")
+        d[k] = v
+    return d
 KST = timezone(timedelta(hours=9))
 VALID_STATUS = ("ok", "partial", "manual", "inactive")
 
@@ -52,6 +63,20 @@ def make_run(source, status, exit_code, pages_fetched, collected, stop_reason,
     """Build one schema-v1 run entry. Counts/status only — no content."""
     if status not in VALID_STATUS:
         raise ValueError(f"invalid status {status!r} (expected one of {VALID_STATUS})")
+    # 정합성 계약(Codex #10): 상태와 종료코드는 모순될 수 없다. ok는 성공(0),
+    # 그 외(partial/manual/inactive)는 반드시 비-0이어야 한다. 음수 카운트도 거부.
+    exit_code = int(exit_code)
+    if status == "ok" and exit_code != 0:
+        raise ValueError(f"status=ok인데 exit_code={exit_code} (0이어야 함)")
+    if status != "ok" and exit_code == 0:
+        raise ValueError(f"status={status!r}인데 exit_code=0 (비-0이어야 함)")
+    for label, val in (("pages_fetched", pages_fetched), ("collected", collected)):
+        if int(val) < 0:
+            raise ValueError(f"{label}가 음수({val}) — 불가")
+    if reported_total is not None and int(reported_total) < 0:
+        raise ValueError(f"reported_total 음수({reported_total}) — 불가")
+    if duplicates is not None and int(duplicates) < 0:
+        raise ValueError(f"duplicates 음수({duplicates}) — 불가")
     run = {
         "source": source,
         "status": status,
@@ -84,9 +109,16 @@ def update_manifest(output_path, new_runs):
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
-                old = json.load(f)
+                old = json.load(f, object_pairs_hook=_reject_dup_keys)
             if not isinstance(old, dict):
                 raise ValueError("manifest top level is not a JSON object")
+            # 알 수 없는 스키마 버전을 조용히 v1로 덮어쓰지 않는다(Codex #10) —
+            # 미래/손상 버전은 corrupt 경로로 보존한 뒤 새로 시작한다.
+            old_ver = old.get("manifest_schema_version")
+            if old_ver != MANIFEST_SCHEMA_VERSION:
+                raise ValueError(
+                    f"unsupported manifest_schema_version {old_ver!r} "
+                    f"(this writer emits v{MANIFEST_SCHEMA_VERSION})")
             old_runs = old.get("runs", [])
             if not isinstance(old_runs, list):
                 raise ValueError('"runs" is not a list')
