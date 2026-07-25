@@ -29,6 +29,7 @@ import hashlib
 import html
 import os
 import pathlib
+import posixpath
 import re
 import sys
 import time
@@ -226,11 +227,14 @@ def robots_allowed(url, disallowed_prefixes):
     for c in list(candidates):
         # /a/../uploads 류 경로 정규화 형태도 함께 검사 (normpath는 path
         # 부분에만 적용 — 쿼리는 그대로 재결합).
+        # os.path.normpath가 아니라 posixpath.normpath다 — Windows에서는
+        # os.path가 ntpath라 '/x/../uploads'가 '\uploads'(백슬래시)로 바뀌어
+        # startswith('/uploads') 검사를 통째로 빠져나간다(robots 우회).
         # POSIX normpath는 선행 '//'를 보존한다 — /%2Fuploads가 디코딩 후
         # //uploads로 남아 startswith(/uploads)를 피하므로, 선행 슬래시를
         # 단일화한 후보도 추가한다
         p_, sep, q_ = c.partition("?")
-        n = os.path.normpath(p_) + sep + q_
+        n = posixpath.normpath(p_) + sep + q_
         candidates.extend([n, re.sub(r"^/+", "/", c), re.sub(r"^/+", "/", n)])
     return not any(_robots_path_match(c, p)
                    for c in candidates for p in disallowed_prefixes)

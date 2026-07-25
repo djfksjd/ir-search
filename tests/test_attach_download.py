@@ -465,13 +465,23 @@ def test_robots_excessive_multi_encoding_fail_closed(attach_download):
 
 # ---- symlink 하위 폴더 탈출 차단 (Codex 재심사 #2 회귀) ------------------------
 
+def _symlink_or_skip(link, target):
+    """symlink 생성이 불가한 환경(Developer Mode/관리자 권한 없는 Windows)에서는
+    이 회귀 테스트를 건너뛴다 — POSIX CI에서는 그대로 실행된다. 조용한 통과가
+    아니라 skip으로 남겨 커버리지 손실이 리포트에 보이게 한다."""
+    try:
+        link.symlink_to(target)
+    except OSError as e:
+        pytest.skip(f"symlink 생성 권한 없음 — 이 플랫폼에서 검증 불가: {e}")
+
+
 def test_symlinked_subdir_blocked(attach_download, monkeypatch, tmp_path):
     """사전 배치된 <download-dir>/<공고ID> symlink로 base 밖에 기록 금지."""
     outside = tmp_path / "outside"
     outside.mkdir()
     base = tmp_path / "atts"
     base.mkdir()
-    (base / "PBLN_X").symlink_to(outside)
+    _symlink_or_skip(base / "PBLN_X", outside)
 
     def boom(req, timeout):
         raise AssertionError("symlink 탈출 상태에서 다운로드가 시도됐다")
@@ -492,7 +502,7 @@ def test_symlinked_base_parent_escape_blocked(attach_download, monkeypatch,
     outside.mkdir()
     base = tmp_path / "atts"
     base.mkdir()
-    (base / "PBLN_Y").symlink_to(outside)
+    _symlink_or_skip(base / "PBLN_Y", outside)
     # is_symlink 검사를 우회하는 가상 시나리오를 realpath 검증이 잡는지 확인
     monkeypatch.setattr(attach_download.pathlib.Path, "is_symlink",
                         lambda self: False)
