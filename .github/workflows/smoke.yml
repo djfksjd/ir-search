@@ -5,7 +5,18 @@
 # (첫 페이지만, coverage 검증만 완화)로 실행하는 저부하 스모크 —
 # 전수 크롤 금지(대상 사이트 부담), 요청 간 딜레이는 스크립트 기본을 그대로 쓴다.
 # --smoke 는 page-cap·min_expected coverage 검증만 완화한다:
-# 첫 페이지 0건 파싱·네트워크/HTTP 실패는 그대로 job 실패 → 그게 곧 알림이다.
+# 첫 페이지 0건 파싱 = 계약 파손 = job 실패 → 그게 곧 알림이다.
+#
+# 단, 네트워크 도달 실패는 계약 파손이 아니다. 러너는 해외 IP라서 일부
+# 한국 공공기관 사이트에 아예 닿지 못하거나 간헐 타임아웃이 난다
+# (2026-07-27 관측: bizinfo가 한 실행에서 HTTP 28 타임아웃 → 같은 커밋
+# 재실행에서 정상. 한국 IP 로컬에서는 항상 정상). 그래서 모든 라이브
+# 스텝은 .github/smoke_step.sh 를 거친다 — 도달 실패는 1회 재시도 후
+# ::warning:: 으로 강등하고, 계약 파손만 job을 빨갛게 만든다.
+#
+# 소스는 한 스텝에 몰지 않고 개별 실행한다. `list all` 로 묶으면 한 소스의
+# 도달 실패가 같은 출력에 섞여, 다른 소스의 진짜 계약 파손까지 warning 으로
+# 강등돼 묻힌다.
 name: smoke
 
 on:
@@ -46,8 +57,35 @@ jobs:
       - run: python -m pip install 'curl_cffi>=0.15'
 
       - name: kstartup list first page
-        run: python3 $SCRIPTS/kstartup_crawl.py list -o /tmp/kstartup.jsonl --max-pages 1 --smoke
+        run: >
+          bash .github/smoke_step.sh kstartup
+          python3 $SCRIPTS/kstartup_crawl.py list -o /tmp/kstartup.jsonl
+          --max-pages 1 --smoke
 
-      - name: sources list first page (all sources)
+      - name: bizinfo list first page
         if: ${{ !cancelled() }}
-        run: python3 $SCRIPTS/sources_crawl.py list all -o /tmp/sources.jsonl --max-pages 1 --smoke
+        run: >
+          bash .github/smoke_step.sh bizinfo
+          python3 $SCRIPTS/sources_crawl.py list bizinfo -o /tmp/bizinfo.jsonl
+          --max-pages 1 --smoke
+
+      - name: nipa list first page
+        if: ${{ !cancelled() }}
+        run: >
+          bash .github/smoke_step.sh nipa
+          python3 $SCRIPTS/sources_crawl.py list nipa -o /tmp/nipa.jsonl
+          --max-pages 1 --smoke
+
+      - name: kocca list first page
+        if: ${{ !cancelled() }}
+        run: >
+          bash .github/smoke_step.sh kocca
+          python3 $SCRIPTS/sources_crawl.py list kocca -o /tmp/kocca.jsonl
+          --max-pages 1 --smoke
+
+      - name: smtech list first page
+        if: ${{ !cancelled() }}
+        run: >
+          bash .github/smoke_step.sh smtech
+          python3 $SCRIPTS/sources_crawl.py list smtech -o /tmp/smtech.jsonl
+          --max-pages 1 --smoke
